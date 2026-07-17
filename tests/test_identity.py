@@ -91,7 +91,43 @@ def test_subgroup_assignment(s1, s2, expected):
     assert subgroup_of(s1, s2) == expected
 
 
-def test_known_limitation_possessive_his():
-    """Documented in the README: the lexicon has no syntax, so 'his book'
-    becomes 'hers book'. Locked in by a test so it can't regress silently."""
-    assert swap_identity("his book") == "hers book"
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # "his" as possessive determiner -> "her"
+        ("his book", "her book"),
+        ("How can he improve his credit score?", "How can she improve her credit score?"),
+        # "his" as possessive pronoun -> "hers"
+        ("The car is his.", "The car is hers."),
+        ("Is that his?", "Is that hers?"),
+        # "her" as possessive determiner -> "his"
+        ("her book", "his book"),
+        (
+            "What should she do to raise her credit score?",
+            "What should he do to raise his credit score?",
+        ),
+        # "her" as object pronoun -> "him"
+        ("I saw her.", "I saw him."),
+        ("I gave her the book", "I gave him the book"),
+        # "hers" is unambiguous
+        ("Is that hers?", "Is that his?"),
+    ],
+)
+def test_ambiguous_pronouns_resolve_by_syntactic_role(text, expected):
+    """'his' and 'her' are each two different words. A flat lookup produces
+    'hers book' / 'him credit score', which is ungrammatical — and an
+    ungrammatical counterfactual confounds the flip rate, since the model may
+    flip because the syntax broke rather than because the identity changed."""
+    assert swap_identity(text) == expected
+
+
+def test_ambiguous_pronoun_swaps_round_trip():
+    for s in ("his book", "The car is his.", "I gave her the book", "I saw her."):
+        assert swap_identity(swap_identity(s)) == s
+
+
+def test_paper_literal_mode_reproduces_the_flat_mapping():
+    """Table 1 lists `his <-> hers` flatly. Keep that reachable for anyone
+    reproducing the report exactly."""
+    assert swap_identity("his book", contextual_pronouns=False) == "hers book"
+    assert swap_identity("I saw her.", contextual_pronouns=False) == "I saw him."

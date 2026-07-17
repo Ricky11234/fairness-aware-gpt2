@@ -220,6 +220,29 @@ A browser opens. Check both:
 
 Press `Ctrl+C` in cmd to stop it.
 
+> ### Seeing a wall of `No module named 'torchvision'` tracebacks?
+>
+> **That's noise, not an error — your app is fine.** Streamlit's hot-reload
+> watcher pokes at every loaded module, which makes `transformers` try to
+> lazily import ~40 vision models it ships with. Those need `torchvision`,
+> which this project doesn't install because it doesn't do images and the
+> install has to stay small enough for Streamlit Cloud.
+>
+> `.streamlit\config.toml` already turns the watcher off (`fileWatcherType =
+> "none"`), which silences it. If you copied an older config, add this:
+>
+> ```toml
+> [server]
+> fileWatcherType = "none"
+> ```
+>
+> One consequence: the app no longer reloads automatically when you edit a
+> file. Press **R** in the browser to rerun.
+>
+> **Don't "fix" it by installing torchvision.** It's a large dependency you
+> don't need, and it puts your Streamlit Cloud build back over the memory
+> limit.
+
 ✅ **Part A done.**
 
 ---
@@ -325,114 +348,74 @@ with a yellow "no model" warning.
 
 ---
 
-# Part D — Data and training
+# Part D — Data and training (QQP only)
+
+**Scope: the Quora paraphrase task.** That's where your paper's fairness
+contribution lives. SST, CFIMDB and the sonnets are CS224N framework
+requirements with no fairness component — skipping them costs you nothing.
 
 Training needs a GPU. Your laptop and Streamlit Cloud don't have one, so use
 Google Colab (free).
 
-## D1. Get the data
+## D1. Open the notebook
 
-You can do this on your laptop:
+`notebooks/train_qqp_colab.ipynb` is in your repo. Either:
 
-```cmd
-uv sync --group train
-uv run scripts\download_data.py
+- Go to **colab.research.google.com** → **GitHub** tab → paste your repo URL, or
+- **File → Upload notebook** and pick the file from your project folder.
+
+Then **Runtime → Change runtime type → T4 GPU**. The first cell checks this — if
+it says no GPU, stop and fix it. CPU training would take weeks.
+
+## D2. Edit two lines
+
+In the notebook:
+
+- Cell 2: `REPO = "https://github.com/YOUR-USERNAME/fairness-aware-gpt2"`
+- Cell 9: `HF_USER = "YOUR-HF-USERNAME"`
+
+## D3. Run the cells in order
+
+| Step | What | Time |
+|---|---|---|
+| Setup + data | Clone, install, download QQP | ~10 min |
+| Smoke test | 1 epoch on 2,000 pairs | ~2 min |
+| Train `cda_reg` | The model your app uses | ~2 hr |
+| Download results | `reproduced.zip` | instant |
+
+**Don't skip the smoke test.** It catches every setup problem in two minutes
+instead of two hours.
+
+**Keep the Colab tab open and visible.** Free Colab kills idle sessions.
+
+## D4. Why 5 epochs, not 10
+
+Your paper's Table 4 reports 5-epoch numbers, so this is a comparison against a
+figure you actually published:
+
+| Mode | Dev acc | Subgroup gap | Flip rate |
+|---|---|---|---|
+| CDA | 0.8835 | 0.0433 | 0.0392 |
+| CDA + Reg. | 0.8856 | 0.0512 | 0.0296 |
+
+Ten epochs is double the time and free Colab will probably disconnect first. Do
+5 now; you can always run 10 later.
+
+## D5. Bring the results home
+
+The notebook downloads `reproduced.zip`. Unzip it into your project so you have:
+
+```
+results\reproduced\cda_reg.json
 ```
 
-Downloads all four datasets your paper uses into `data\`:
+Then commit and push in GitHub Desktop. **Your live app will now show your
+numbers next to the paper's.**
 
-| Task | Files |
-|---|---|
-| QQP (paraphrase) | `quora-train.csv`, `quora-dev.csv`, `quora-test-student.csv` |
-| SST (sentiment, 5 classes) | `ids-sst-train.csv`, `ids-sst-dev.csv`, `ids-sst-test.csv` |
-| CFIMDB (sentiment, 2 classes) | `ids-cfimdb-train.csv`, `ids-cfimdb-dev.csv` |
-| Sonnets | `sonnets.txt` |
+## D6. Optional — the other two models
 
-The QQP dev split is 40,430 — exactly the number in your paper, so those
-results will be comparable.
-
-> `data\` is ignored by git on purpose. Don't try to push it.
-
-## D2. Train on Colab
-
-Go to **colab.research.google.com**, new notebook, then
-**Runtime → Change runtime type → T4 GPU**.
-
-Paste into a cell and run:
-
-```python
-!pip install uv
-!git clone https://github.com/<your-username>/fairness-aware-gpt2
-%cd fairness-aware-gpt2
-!uv sync --group train
-!uv pip install torch --torch-backend=auto
-!uv run scripts/download_data.py
-```
-
-The `--torch-backend=auto` line swaps the CPU PyTorch for the GPU one. Colab
-has a GPU; your laptop doesn't.
-
-Then a quick test run first — about 2 minutes:
-
-```python
-!uv run fairness-train --mode cda_reg --train data/quora-train.csv \
-    --dev data/quora-dev.csv --out /tmp/smoke --epochs 1 \
-    --train-subset 2000 --eval-subset 1000
-```
-
-If that finishes without errors, run the real thing.
-
-### The three paraphrase models (~3 hours each)
-
-This is your paper's main contribution. `cda_reg` is the one the app uses.
-
-```python
-!uv run fairness-train --mode cda_reg --train data/quora-train.csv \
-    --dev data/quora-dev.csv --out checkpoints/cda_reg --epochs 10 \
-    --lambda-fair 0.5 --save-half
-```
-
-For the full Table 2 you need all three. Run them one at a time:
-
-```python
-!uv run fairness-train --mode baseline --train data/quora-train.csv \
-    --dev data/quora-dev.csv --out checkpoints/baseline --epochs 10
-!uv run fairness-train --mode cda --train data/quora-train.csv \
-    --dev data/quora-dev.csv --out checkpoints/cda --epochs 10
-```
-
-> Keep the Colab tab open — it disconnects when idle. Free Colab may cut you
-> off before three runs finish. Do `cda_reg` first so you have something to
-> deploy.
-
-`--save-half` halves the model size (~250MB), which matters for Streamlit
-Cloud's memory limit.
-
-### The other three tasks (minutes, not hours)
-
-```python
-!uv run fairness-sentiment --task sst --train data/ids-sst-train.csv \
-    --dev data/ids-sst-dev.csv --out checkpoints/sst --epochs 10
-!uv run fairness-sentiment --task cfimdb --train data/ids-cfimdb-train.csv \
-    --dev data/ids-cfimdb-dev.csv --out checkpoints/cfimdb --epochs 10
-!uv run fairness-sonnet --train data/sonnets.txt --out checkpoints/sonnet --epochs 10
-```
-
-### Get your results back
-
-Every run writes a small JSON file into `results/reproduced/`. Those are what
-make your dashboard show **your** numbers instead of the paper's. Download them
-from Colab:
-
-```python
-from google.colab import files
-!zip -r reproduced.zip results/reproduced
-files.download("reproduced.zip")
-```
-
-Unzip into your project's `results\reproduced\` folder, then commit and push
-in GitHub Desktop. Your live app will show a reproduced column next to the
-paper's numbers.
+`cda_reg` alone is enough to deploy. Run `baseline` and `cda` only if you want
+the full Table 2 comparison. One at a time, re-downloading results after each.
 
 ✅ **Part D done.**
 

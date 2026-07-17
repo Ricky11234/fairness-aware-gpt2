@@ -156,7 +156,10 @@ with probe_tab:
             st.markdown("**Identity-swapped copy**")
             st.markdown(highlight_swaps(q1, cf1), unsafe_allow_html=True)
             st.markdown(highlight_swaps(q2, cf2), unsafe_allow_html=True)
-            st.caption(f"Subgroup: {subgroup_of(q1, q2)}")
+            st.caption(
+                f"Subgroup — original: **{subgroup_of(q1, q2)}** → "
+                f"swapped: **{subgroup_of(cf1, cf2)}**"
+            )
 
             if not contains_identity(q1 + " " + q2):
                 st.info(
@@ -195,7 +198,7 @@ with probe_tab:
 # Tab 2 — results
 # --------------------------------------------------------------------------
 with results_tab:
-    status = replication_status(REPRODUCED)
+    status = replication_status(REPRODUCED)  # paraphrase models only
     done = sum(status.values())
 
     if done == 0:
@@ -206,13 +209,17 @@ with results_tab:
         )
     elif done < len(status):
         st.warning(
-            f"**Partial replication — {done} of {len(status)} components reproduced.** "
+            f"**Partial — {done} of {len(status)} paraphrase models reproduced.** "
             "Blank cells below haven't been run yet."
         )
     else:
-        st.success("**Full replication.** Every component has been reproduced locally.")
+        st.success(
+            "**Paraphrase task fully reproduced.** All three models trained and evaluated here."
+        )
 
-    with st.expander(f"Replication status — {done}/{len(status)} components", expanded=done == 0):
+    with st.expander(
+        f"Replication status — {done}/{len(status)} paraphrase models", expanded=done == 0
+    ):
         st.dataframe(
             pd.DataFrame(
                 [
@@ -224,8 +231,11 @@ with results_tab:
             hide_index=True,
         )
         st.caption(
-            "The leaderboard test accuracy (0.876) can't be reproduced here — it needs a "
-            "submission to the CS224N leaderboard, which holds the test labels."
+            "Scope is the paraphrase task — the report's fairness contribution. SST, "
+            "CFIMDB and sonnet generation are CS224N framework requirements with no "
+            "fairness component; their reported figures appear below for completeness. "
+            "The leaderboard test accuracy (0.876) can't be reproduced at all — it needs "
+            "a submission to the CS224N leaderboard, which holds the test labels."
         )
 
     st.subheader("Paraphrase detection")
@@ -409,8 +419,11 @@ with method_tab:
     st.markdown(
         "- Subgroup assignment uses fixed lexicons and misses implicit cues.\n"
         "- Swaps are binary-gender and cover a small name list.\n"
-        "- `his → hers` is grammatically wrong in possessive-determiner position; "
-        "the lexicon can't see syntax.\n"
+        "- `his` and `her` are each two words (possessive determiner vs. pronoun). "
+        "The paper's flat mapping produces ungrammatical counterfactuals like "
+        "*hers book*, which confounds the flip rate — a model can flip because the "
+        "syntax broke, not because the identity changed. This implementation "
+        "resolves them by syntactic role instead.\n"
         "- ~90% of the dev set is identity-free, so headline accuracy is dominated "
         "by examples the interventions never touch."
     )

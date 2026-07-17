@@ -111,34 +111,81 @@ def fetch_cfimdb(out_dir: str) -> None:
         print(f"  {fname}  {n:,} reviews")
 
 
+# Shakespeare's sonnets are public domain. Project Gutenberg blocks unknown
+# user-agents (urllib gets a block page, not the book), so the GITenberg mirror
+# on GitHub is the primary source — same Project Gutenberg etext #1041, no
+# blocking. Gutenberg itself is kept as a fallback, with a browser user-agent.
+SONNET_SOURCES = [
+    "https://raw.githubusercontent.com/GITenberg/Shakespeare-s-Sonnets_1041/master/1041.txt",
+    "https://www.gutenberg.org/cache/epub/1041/pg1041.txt",
+    "https://www.gutenberg.org/files/1041/1041.txt",
+]
+EXPECTED_SONNETS = 154
+_UA = "Mozilla/5.0 (compatible; fairness-gpt2/0.2; +https://github.com/)"
+
+
+def _strip_gutenberg_boilerplate(raw: str) -> str:
+    """Drop the PG header and licence footer, whichever marker style is used."""
+    for marker in ("*** START OF", "***START OF"):
+        i = raw.find(marker)
+        if i != -1:
+            raw = raw[raw.find("\n", i) + 1 :]
+            break
+    for marker in ("*** END OF", "***END OF"):
+        i = raw.rfind(marker)
+        if i != -1:
+            raw = raw[:i]
+            break
+    return raw.strip()
+
+
 def fetch_sonnets(out_dir: str) -> None:
-    """Shakespeare's sonnets (public domain, via Project Gutenberg)."""
+    """Download Shakespeare's sonnets and verify we actually got the poems.
+
+    Writing whatever the server returned without checking is how you end up with
+    a 0-sonnet corpus and a confusing training crash three steps later.
+    """
+    import urllib.error
     import urllib.request
-
-    print("\nDownloading Shakespeare's sonnets...")
-    url = "https://www.gutenberg.org/cache/epub/1041/pg1041.txt"
-    with urllib.request.urlopen(url, timeout=60) as r:
-        raw = r.read().decode("utf-8", errors="replace")
-
-    # Strip the Gutenberg header/footer.
-    start = raw.find("*** START OF")
-    end = raw.find("*** END OF")
-    if start != -1:
-        raw = raw[raw.find("\n", start) + 1 :]
-    if end != -1:
-        raw = raw[: raw.rfind("*** END OF")]
-
-    path = os.path.join(out_dir, "sonnets.txt")
-    os.makedirs(out_dir, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(raw.strip())
 
     from fairness_gpt2.train_sonnet import parse_sonnets
 
-    n = len(parse_sonnets(path))
-    print(f"  sonnets.txt  {n} sonnets parsed")
-    if n < 100:
-        print("  Warning: expected ~154 sonnets. Check the file before training.")
+    print("\nDownloading Shakespeare's sonnets...")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "sonnets.txt")
+    tmp = path + ".tmp"
+
+    for url in SONNET_SOURCES:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            print(f"  {url.split('/')[2]}: unreachable ({e})")
+            continue
+
+        text = _strip_gutenberg_boilerplate(raw)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        n = len(parse_sonnets(tmp))
+
+        if n >= EXPECTED_SONNETS - 5:
+            os.replace(tmp, path)
+            print(f"  sonnets.txt  {n} sonnets parsed  (from {url.split('/')[2]})")
+            return
+
+        print(
+            f"  {url.split('/')[2]}: got {n} sonnets, expected ~{EXPECTED_SONNETS} — "
+            f"response starts {text[:60]!r}"
+        )
+
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    raise SystemExit(
+        "Could not download a usable sonnet corpus from any source.\n"
+        "Download https://www.gutenberg.org/cache/epub/1041/pg1041.txt in a browser,\n"
+        f"save it as {path}, and re-run with --only qqp --only sst --only cfimdb to skip this step."
+    )
 
 
 def main() -> None:

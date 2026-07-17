@@ -34,6 +34,7 @@ src/fairness_gpt2/
   train_sonnet.py           Sonnet LM fine-tuning + CHRF
   evaluate.py               Accuracy, subgroup gap, flip rate
   results.py                Reported-vs-reproduced results loading
+notebooks/train_qqp_colab.ipynb   Colab notebook — QQP training end to end
 tests/                      Lexicon, metric, and data-pipeline tests (no weights needed)
 scripts/download_data.py    Fetch QQP from GLUE, write the CSVs the loader wants
 scripts/eval_checkpoint.py  Evaluate a checkpoint, dump metrics JSON
@@ -159,7 +160,13 @@ uv run scripts/download_data.py --only qqp # or just one
 | QQP | `nyu-mll/glue` (qqp) | 363,846 / 40,430 / 390,965 |
 | SST-5 | `SetFit/sst5` | 8,544 / 1,101 / 2,210 |
 | CFIMDB | `tasksource/counterfactually-augmented-imdb` | 1,707 / 245 / 488 |
-| Sonnets | Project Gutenberg (public domain) | 154 sonnets |
+| Sonnets | GITenberg mirror of PG etext #1041 (public domain) | 154 sonnets |
+
+Sonnets come from the GITenberg GitHub mirror rather than gutenberg.org
+directly: PG blocks unknown user-agents and serves a block page, which the
+downloader would otherwise save as a 0-sonnet corpus. `fetch_sonnets` now
+validates that it parsed ~154 sonnets before writing, and falls back to
+gutenberg.org with a browser user-agent.
 
 GLUE's QQP validation split is 40,430 pairs — exactly the dev-set size in the
 report — so fairness metrics are directly comparable. GLUE's train split is
@@ -276,6 +283,16 @@ drift.
 To run locally against a local checkpoint, skip the Hub — the app finds
 `checkpoints/cda_reg/` on its own.
 
+### `No module named 'torchvision'` spam on startup
+
+Cosmetic. Streamlit's file watcher walks `sys.modules` and calls
+`hasattr(m, "__path__")` on each entry, which trips `transformers`' lazy loader
+into importing its vision models — none of which this project uses, and all of
+which want torchvision. `.streamlit/config.toml` sets `fileWatcherType = "none"`
+to stop it, at the cost of hot-reload (press **R** in the browser to rerun).
+Installing torchvision would also silence it, and would undo the install-size
+work described above.
+
 ### If the app runs out of memory
 
 The free tier is tight for a 124M-parameter model. In order of effectiveness:
@@ -290,9 +307,13 @@ From the report, plus two the code makes visible:
 
 - Subgroup assignment relies on fixed lexicons and misses implicit cues.
 - Swaps assume binary gender and a limited name list.
-- `his → hers` is wrong in possessive-determiner position ("his book" → "hers
-  book"). The lexicon has no syntax; fixing it needs POS tagging. There's a test
-  pinning this behaviour so it can't change silently.
+- **Fixed, and a deviation from the report:** Table 1 lists `his ↔ hers` as a flat
+  pair, but `his` and `her` are each two words (possessive determiner vs.
+  pronoun/object). The literal mapping yields "hers book" and "him credit score" —
+  ungrammatical counterfactuals that confound the flip rate, since the model can
+  flip because the syntax broke rather than because the identity changed.
+  `swap_identity` now resolves them by syntactic role. Pass
+  `contextual_pronouns=False` to reproduce the report's literal mapping.
 - Pairs carrying both male and female cues fall into a `mixed` bucket that the
   subgroup gap excludes; the report's four groups don't cover them.
 - ~90% of the dev set is identity-free, so headline accuracy is driven by

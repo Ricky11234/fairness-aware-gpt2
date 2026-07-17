@@ -114,6 +114,40 @@ def test_parse_sonnets_strips_roman_numeral_headers(sonnet_file):
         assert len(sonnet) == 4
 
 
+def test_parse_sonnets_handles_crlf_and_indentation(tmp_path):
+    """The Gutenberg etext is CRLF with two-space indents. Parsing must survive
+    both — this is the real-world format, not the tidy fixture above."""
+    path = tmp_path / "crlf.txt"
+    path.write_bytes(
+        b"  I\r\n\r\n"
+        b"  From fairest creatures we desire increase,\r\n"
+        b"  That thereby beauty's rose might never die,\r\n"
+        b"  But as the riper should by time decease,\r\n"
+        b"    His tender heir might bear his memory:\r\n\r\n"
+        b"  II\r\n\r\n"
+        b"  When forty winters shall besiege thy brow,\r\n"
+        b"  And dig deep trenches in thy beauty's field,\r\n"
+        b"  Thy youth's proud livery so gazed on now,\r\n"
+        b"    Will be a tatter'd weed of small worth held:\r\n"
+    )
+    sonnets = parse_sonnets(str(path))
+    assert len(sonnets) == 2
+    assert sonnets[0][0] == "From fairest creatures we desire increase,"
+    assert "\r" not in "".join(sonnets[0])
+
+
+def test_parse_sonnets_rejects_a_gutenberg_block_page(tmp_path):
+    """PG serves an HTML block page to unknown user-agents. Writing that to disk
+    silently is what produced the '0 sonnets parsed' failure — the downloader
+    now validates, but the parser must not hallucinate sonnets out of HTML."""
+    path = tmp_path / "blocked.txt"
+    path.write_text(
+        "<html><head><title>Access Denied</title></head>\n\n"
+        "<body><p>Your IP has been automatically blocked.</p></body></html>\n"
+    )
+    assert len(parse_sonnets(str(path))) == 0
+
+
 def test_parse_sonnets_skips_blocks_too_short_to_split(tmp_path):
     """A block needs more than the 3 prompt lines, or there's no reference left."""
     path = tmp_path / "s.txt"
@@ -172,10 +206,19 @@ def test_secondary_comparison_includes_sonnet_chrf():
     assert cfimdb["reproduced"] is None
 
 
-def test_replication_status_tracks_all_six_components():
+def test_replication_status_defaults_to_the_paraphrase_task():
+    """Scope is QQP — the report's fairness contribution. Skipping the framework
+    tasks shouldn't show up as an incomplete replication."""
     status = replication_status({"cda_reg": {}, "sst": {}})
-    assert len(status) == 6
+    assert len(status) == 3
     assert status["Paraphrase — CDA + Reg."] is True
+    assert status["Paraphrase — baseline"] is False
+    assert "SST (5-class)" not in status
+
+
+def test_replication_status_can_include_secondary_tasks():
+    status = replication_status({"cda_reg": {}, "sst": {}}, primary_only=False)
+    assert len(status) == 6
     assert status["SST (5-class)"] is True
     assert status["Sonnet generation"] is False
 
