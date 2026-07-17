@@ -85,7 +85,17 @@ def main() -> None:
     if args.train_subset:
         train_pairs = train_pairs[: args.train_subset]
     eval_pairs = dev_pairs[: args.eval_subset] if args.eval_subset else dev_pairs
-    print(f"train={len(train_pairs)}  dev={len(dev_pairs)}  device={device}")
+    if device == "cpu":
+        print(
+            "\n  WARNING: no GPU detected — training on CPU.\n"
+            "  A full run will take days. On Colab: Runtime > Change runtime type > T4 GPU.\n"
+            "  If you have a GPU but see this, `uv run` may have reverted CUDA torch to the\n"
+            "  CPU wheel pinned in uv.lock. Set UV_NO_SYNC=1 (see notebooks/train_qqp_colab.ipynb).\n"
+        )
+    print(
+        f"train={len(train_pairs)}  eval={len(eval_pairs)}"
+        f"{f' (subset of {len(dev_pairs)})' if args.eval_subset else ''}  device={device}"
+    )
 
     tokenizer = build_tokenizer()
     model = GPT2ParaphraseClassifier().to(device)
@@ -150,7 +160,7 @@ def main() -> None:
 
             scaler.scale(loss).backward()
             sum_task += task_loss.item()
-            sum_fair += float(fair_loss)
+            sum_fair += fair_loss.detach().item()
             steps += 1
 
             if (i + 1) % args.grad_accum == 0:
