@@ -1,0 +1,26 @@
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+# uv.lock IS committed — it is what Streamlit Cloud installs from.
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Data and weights (too large for git; see README)
+data/*
+!data/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+*.bin
+*.safetensors
+
+# OS / editors
+.DS_Store
+.ipynb_checkpoints/
+.idea/
+.vscode/

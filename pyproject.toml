@@ -1,0 +1,51 @@
+[project]
+name = "fairness-gpt2"
+version = "0.1.0"
+description = "Fairness-Aware GPT-2 for Paraphrase Detection"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Deonna Owens", email = "deonnao@stanford.edu" }]
+
+dependencies = [
+    "streamlit>=1.36",
+    "torch>=2.3,<3",
+    "transformers>=4.41",
+    "huggingface-hub>=0.23",
+    "pandas>=2.0",
+    "altair>=5.0",
+]
+
+[project.scripts]
+fairness-train = "fairness_gpt2.train:main"
+
+[dependency-groups]
+train = ["datasets>=2.19", "numpy>=1.26", "scikit-learn>=1.4", "tqdm>=4.66"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+default-groups = []
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

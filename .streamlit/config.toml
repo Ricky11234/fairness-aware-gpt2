@@ -1,0 +1,25 @@
+[theme]
+base = "light"
+primaryColor = "#3b6ea5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6f8"
+textColor = "#1b1f23"
+
+[server]
+maxUploadSize = 5
+
+# Streamlit's hot-reload watcher walks every entry in sys.modules and calls
+# hasattr(m, "__path__") on it. That trips transformers' lazy loader, which
+# imports ~40 vision models that require torchvision — which this project
+# deliberately doesn't install (it's inference-only, text-only, and the CPU
+# install has to stay under Streamlit Cloud's ~1GB ceiling). Each one logs a
+# ModuleNotFoundError traceback. Harmless, but it buries real errors and slows
+# startup. Turning the watcher off silences it.
+#
+# Trade-off: the app no longer auto-reloads when you save a file. Press "R" in
+# the browser, or use the Rerun button. Set to "auto" if you want hot-reload
+# back and don't mind the noise.
+fileWatcherType = "none"
+
+[logger]
+level = "warning"
