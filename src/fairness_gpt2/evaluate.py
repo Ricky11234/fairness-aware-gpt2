@@ -65,14 +65,29 @@ def prediction_flip_rate(
     device: str = "cuda",
     batch_size: int = 32,
     max_length: int = 128,
+    contextual_pronouns: bool = True,
 ) -> dict:
     """Fraction of identity-bearing examples whose label changes under a
-    deterministic identity swap."""
+    deterministic identity swap.
+
+    Args:
+        contextual_pronouns: resolve "his"/"her" by syntactic role, keeping the
+            counterfactual grammatical. Set False to reproduce the report's
+            literal Table 1 mapping (his -> hers always).
+    """
     idty = [p for p in pairs if contains_identity(p.s1) or contains_identity(p.s2)]
     if not idty:
         return {"flip_rate": 0.0, "flips": 0, "n_identity": 0}
 
-    swapped = [Pair(swap_identity(p.s1), swap_identity(p.s2), p.label, p.pid) for p in idty]
+    swapped = [
+        Pair(
+            swap_identity(p.s1, contextual_pronouns=contextual_pronouns),
+            swap_identity(p.s2, contextual_pronouns=contextual_pronouns),
+            p.label,
+            p.pid,
+        )
+        for p in idty
+    ]
     orig_preds = predict(model, tokenizer, idty, device, batch_size, max_length)
     cf_preds = predict(model, tokenizer, swapped, device, batch_size, max_length)
 
