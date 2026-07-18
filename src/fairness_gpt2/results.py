@@ -125,3 +125,46 @@ def replication_status(reproduced: dict, primary_only: bool = True) -> dict[str,
     if not primary_only:
         components.update(SECONDARY_COMPONENTS)
     return {label: key in reproduced for label, key in components.items()}
+
+
+def intervention_effect(reproduced: dict) -> dict | None:
+    """Baseline vs CDA + Regularization, from this project's own runs.
+
+    Returns None when the baseline hasn't been trained — the comparison is
+    meaningless without it, and borrowing the paper's baseline to stand in for
+    your own is exactly the move that makes a replication untrustworthy.
+    """
+    base = reproduced.get("baseline")
+    reg = reproduced.get("cda_reg")
+    if not (base and reg):
+        return None
+
+    def pct_change(before, after):
+        return (after - before) / before if before else None
+
+    return {
+        "accuracy": {
+            "baseline": base["accuracy"],
+            "cda_reg": reg["accuracy"],
+            "delta": reg["accuracy"] - base["accuracy"],
+            "pct": pct_change(base["accuracy"], reg["accuracy"]),
+        },
+        "flip_rate": {
+            "baseline": base["flip_rate"],
+            "cda_reg": reg["flip_rate"],
+            "delta": reg["flip_rate"] - base["flip_rate"],
+            "pct": pct_change(base["flip_rate"], reg["flip_rate"]),
+        },
+        "subgroup_gap": {
+            "baseline": base["subgroup_gap"],
+            "cda_reg": reg["subgroup_gap"],
+            "delta": reg["subgroup_gap"] - base["subgroup_gap"],
+            "pct": pct_change(base["subgroup_gap"], reg["subgroup_gap"]),
+        },
+        "flips": {
+            "baseline": base.get("flips"),
+            "cda_reg": reg.get("flips"),
+            "n_identity": reg.get("n_identity"),
+        },
+        "has_cda": "cda" in reproduced,
+    }

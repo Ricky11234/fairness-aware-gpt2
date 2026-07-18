@@ -26,6 +26,14 @@ def main() -> None:
     ap.add_argument("--dev", required=True)
     ap.add_argument("--name", required=True)
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument(
+        "--literal-pronouns",
+        action="store_true",
+        help="Use the report's literal Table 1 mapping (his -> hers always) instead of "
+        "resolving his/her by syntactic role. Produces ungrammatical counterfactuals "
+        "like 'hers credit score'; comparing the two runs isolates how much of the flip "
+        "rate is demographic sensitivity versus broken syntax.",
+    )
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -33,7 +41,14 @@ def main() -> None:
     tokenizer = build_tokenizer()
     pairs = load_qqp(args.dev)
 
-    metrics = evaluate(model, tokenizer, pairs, device, batch_size=args.batch_size)
+    metrics = evaluate(
+        model,
+        tokenizer,
+        pairs,
+        device,
+        batch_size=args.batch_size,
+        contextual_pronouns=not args.literal_pronouns,
+    )
     print(json.dumps(metrics, indent=2))
 
     os.makedirs("results/reproduced", exist_ok=True)

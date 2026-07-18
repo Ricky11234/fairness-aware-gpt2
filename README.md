@@ -1,22 +1,86 @@
-# Fairness-Aware GPT-2 for Paraphrase Detection
+# Twin Test
 
-Implementation of the CS224N project: does fairness-aware training reduce
-identity-based prediction instability in GPT-2 without costing task accuracy?
+**Does your question-matching model give the same answer when only the name changes?**
 
-Two interventions on top of a GPT-2 paraphrase classifier fine-tuned on Quora
-Question Pairs:
+Duplicate-question detection routes support tickets, merges help-centre articles,
+and surfaces existing answers in community Q&A. When that model's decision
+depends on whether the question says *James* or *Mary*, the same question gets a
+different outcome for different people — and aggregate accuracy won't show it.
 
-- **CDA** — counterfactual data augmentation over 60 gendered name pairs, 20
-  ethnicity-associated name pairs, and 22 pronoun/gendered-term swaps.
-- **Consistency regularization** — a symmetric-KL penalty (λ = 0.5) between the
-  prediction on an example and on its identity-swapped twin.
+Twin Test measures it. Paste a pair or upload a CSV; it swaps every name and
+gendered word for its counterfactual, re-runs the model, and reports how many
+decisions flipped.
 
-Reported result: CDA cuts the subgroup accuracy gap from 3.65% → 2.90%;
-regularization cuts the prediction flip rate from 4.56% → 2.80% while holding
-dev accuracy at 89.56%.
+```
+"Why was he charged twice?"   → duplicate      (p = 0.81)
+"Why was she charged twice?"  → not duplicate  (p = 0.43)   ← flip
+```
 
-Managed with [uv](https://docs.astral.sh/uv/). Deployed on Streamlit Community
-Cloud, which reads `uv.lock` natively.
+The task is unchanged by the swap: if two questions are duplicates about James,
+they're duplicates about Mary — the name appears on both sides and cancels. So a
+flip means the identity token moved the decision, not the meaning.
+
+## What's under it
+
+A GPT-2 paraphrase classifier fine-tuned on Quora Question Pairs with two
+fairness interventions — counterfactual data augmentation and a symmetric-KL
+consistency penalty (λ = 0.5) — plus an audit harness of 102 substitution pairs
+(60 gendered names, 20 ethnicity-associated names, 22 pronoun/term swaps).
+
+The classifier isn't the point; 89% on QQP isn't state of the art. **The audit
+harness is the point.**
+
+## Replication
+
+The method is replicated from a Stanford CS224N report (cited at the bottom).
+Reproducing it from the text alone means reconstructing what the text omits, and
+two of those reconstructions became findings:
+
+**1. The paper's subgroup definition is recoverable from its own arithmetic.**
+Table 5 reports per-subgroup counts but never defines the subgroups. The counts
+define them anyway — they sum to 40,996 against a 40,430-pair dev set:
+
+```
+|male ∩ female|             = 40,996 − 40,430      = 566
+|male ∪ female|             = 1833 + 1751 − 566    = 3,018
+union + name-only + neutral = 3,018 + 734 + 36,678 = 40,430   ← the dev set, exactly
+implied n_identity          = 3,018 + 734          = 3,752    ← paper reports 3,751
+```
+
+Two independent checks land exact. Male/female are decided by gendered *terms*,
+not names; a pair with both counts in both groups; *name-only* means a name with
+no gendered term. The intuitive reading (`James` → male) collapses name-only from
+734 examples to 14, and the subgroup gap then measures noise on 14 rows.
+
+**2. The flip-rate metric has a grammatical confound.** Table 1 lists `his ↔ hers`
+as a flat pair, but English overloads both words:
+
+```
+literal:            "improve his credit score"  →  "improve hers credit score"
+                    "raise her credit score"    →  "raise him credit score"
+resolved by role:   "improve his credit score"  →  "improve her credit score"
+```
+
+Ungrammatical text is out-of-distribution for GPT-2, so it may flip because the
+sentence broke rather than because the name changed. `swap_identity` resolves
+`his`/`her` by syntactic role; `--literal-pronouns` on `eval_checkpoint.py`
+reproduces the original mapping so the effect can be measured.
+
+### Results
+
+| Metric | Paper (5 ep) | This replication |
+|---|---|---|
+| Dev accuracy | 0.8856 | 0.8893 |
+| Flip rate | 0.0296 | 0.0159 |
+| Identity-bearing dev examples | 3,751 | 3,710 (98.9%) |
+
+Accuracy reproduces. The flip rate lands lower — a ~1% lexicon-coverage
+difference can't explain that, so the confound above is the leading candidate.
+
+**Scope: QQP only.** The source report also covers SST, CFIMDB and sonnet
+generation as course requirements; those carry no fairness component and are out
+of scope. The leaderboard test accuracy (0.876) isn't reproducible — it needs a
+submission to a leaderboard that holds the labels.
 
 ## Layout
 
@@ -319,8 +383,15 @@ From the report, plus two the code makes visible:
 - ~90% of the dev set is identity-free, so headline accuracy is driven by
   examples the interventions never touch.
 
-## References
+## Citation
 
-Radford et al. 2019 (GPT-2) · Maudslay et al. 2019 (name-based CDS) · Zhao et al.
-2018 (WinoBias) · Dixon et al. 2018 · Zhang et al. 2018 · Loshchilov & Hutter
-2017 (AdamW).
+Method replicated from:
+
+> Owens, D. *Fairness-Aware Fine-Tuning of GPT-2 for Paraphrase Detection.*
+> Stanford CS224N Default Project.
+
+Also drawing on: Radford et al. 2019 (GPT-2) · Maudslay et al. 2019 (name-based
+counterfactual data substitution) · Bertrand & Mullainathan 2004 (audit-study
+name lists) · Zhao et al. 2018 (WinoBias) · Dixon et al. 2018 · Zhang et al. 2018
+(adversarial debiasing) · Black et al. 2020 (FlipTest) · Kaushik et al. 2020
+(counterfactually-augmented data) · Loshchilov & Hutter 2017 (AdamW).

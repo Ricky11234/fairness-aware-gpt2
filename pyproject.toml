@@ -1,11 +1,11 @@
 [project]
 name = "fairness-gpt2"
 version = "0.1.0"
-description = "Fairness-Aware GPT-2 for Paraphrase Detection"
+description = "Twin Test — identity-robustness auditing for question-matching models"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
-authors = [{ name = "Deonna Owens", email = "deonnao@stanford.edu" }]
+authors = [{ name = "Abhinav Barman", email = "abhinav.barman.civ23@itbhu.ac.in" }]
 
 dependencies = [
     "streamlit>=1.36",

@@ -261,45 +261,45 @@ def contains_identity(text: str) -> bool:
     return any(t.lower() in SWAP_MAP for t in _TOKEN_RE.findall(text))
 
 
-def subgroup_of(s1: str, s2: str) -> str:
-    """Assign a question pair to one of: male / female / name-only / neutral / mixed.
+ALL_NAMES = MALE_NAMES | FEMALE_NAMES | ETHNICITY_ALL
 
-    Rules (Section 6.2 of the paper, made explicit):
-      - "male"      -> gendered pronouns/nouns or gendered names, male side only
-      - "female"    -> same, female side only
-      - "name-only" -> identity names present but no gendered pronoun/noun,
-                       or only ethnicity-associated names
-      - "mixed"     -> both male and female cues present (excluded from the gap)
-      - "neutral"   -> no identity terms at all
+
+def subgroups_of(s1: str, s2: str) -> set[str]:
+    """Assign a pair to the report's subgroups: male / female / name-only / neutral.
+
+    Recovered exactly from Table 5's arithmetic. Table 5 sums to 40,996 against a
+    40,430-pair dev set — an excess of 566 — which means the groups overlap. Under
+    the rules below:
+
+        |male ∩ female|             = 566
+        |male ∪ female|             = 1833 + 1751 - 566 = 3018
+        union + name-only + neutral = 3018 + 734 + 36678 = 40,430  (= dev, exactly)
+        implied n_identity          = 3018 + 734 = 3752  (report says 3751)
+
+    The rules:
+      - "male"/"female" are decided by gendered TERMS (pronouns, gendered nouns).
+        Names do NOT make a pair male or female.
+      - A pair carrying both male and female terms belongs to BOTH groups. This is
+        why the table over-sums, and why no "mixed" bucket is needed.
+      - "name-only" means a name is present and no gendered term is.
+      - "neutral" means no identity token at all.
+
+    Returns a set because male and female are not mutually exclusive.
     """
     toks = {t.lower() for t in _TOKEN_RE.findall(f"{s1} {s2}")}
 
-    has_male_term = bool(toks & MALE_TERMS)
-    has_female_term = bool(toks & FEMALE_TERMS)
-    has_male_name = bool(toks & MALE_NAMES)
-    has_female_name = bool(toks & FEMALE_NAMES)
-    has_eth_name = bool(toks & ETHNICITY_ALL)
+    groups: set[str] = set()
+    if toks & MALE_TERMS:
+        groups.add("male")
+    if toks & FEMALE_TERMS:
+        groups.add("female")
+    if groups:
+        return groups
 
-    male = has_male_term or has_male_name
-    female = has_female_term or has_female_name
-
-    if male and female:
-        return "mixed"
-    if male:
-        return "male"
-    if female:
-        return "female"
-    if has_eth_name:
-        return "name-only"
-    return "neutral"
+    return {"name-only"} if toks & ALL_NAMES else {"neutral"}
 
 
-if __name__ == "__main__":
-    assert len(GENDERED_NAMES) == 60, len(GENDERED_NAMES)
-    assert len(ETHNICITY_NAMES) == 20, len(ETHNICITY_NAMES)
-    assert len(GENDERED_TERMS) == 22, len(GENDERED_TERMS)
-    overlap = {n for p in GENDERED_NAMES for n in p} & {n for p in ETHNICITY_NAMES for n in p}
-    assert not overlap, overlap
-    print(swap_identity("Why did James tell his brother that Connor was late?"))
-    print(subgroup_of("Is he a good king?", "Was the king kind?"))
-    print("lexicons OK")
+def subgroup_of(s1: str, s2: str) -> str:
+    """Single display label for a pair. Joins with '+' when a pair is in both
+    gendered groups (the 566 overlap). For metrics use ``subgroups_of``."""
+    return "+".join(sorted(subgroups_of(s1, s2)))

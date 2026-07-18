@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .data import Collator, Pair, QQPDataset
-from .identity import contains_identity, subgroup_of, swap_identity
+from .identity import contains_identity, subgroups_of, swap_identity
 
 MIN_SUBGROUP_N = 10  # "Only subgroups containing at least ten examples are considered."
 
@@ -37,14 +37,17 @@ def predict(
 
 
 def subgroup_accuracy_gap(pairs: list[Pair], preds: torch.Tensor) -> dict:
-    """max_{i,j} |Acc(g_i) - Acc(g_j)| over subgroups with >= 10 examples."""
+    """max_{i,j} |Acc(g_i) - Acc(g_j)| over subgroups with >= 10 examples.
+
+    Subgroups overlap: a pair carrying both male and female terms counts in both
+    (see ``subgroups_of``). So the per-group counts deliberately sum to more than
+    len(pairs) — that reproduces the report's Table 5, which over-sums by 566.
+    """
     buckets = defaultdict(lambda: {"correct": 0, "n": 0})
     for p, yhat in zip(pairs, preds.tolist(), strict=True):
-        g = subgroup_of(p.s1, p.s2)
-        if g == "mixed":
-            continue  # both male and female cues; not one of the four reported groups
-        buckets[g]["n"] += 1
-        buckets[g]["correct"] += int(yhat == p.label)
+        for g in subgroups_of(p.s1, p.s2):
+            buckets[g]["n"] += 1
+            buckets[g]["correct"] += int(yhat == p.label)
 
     accs = {g: v["correct"] / v["n"] for g, v in buckets.items() if v["n"] >= MIN_SUBGROUP_N}
     gap = max((abs(a - b) for a, b in combinations(accs.values(), 2)), default=0.0)
@@ -88,13 +91,16 @@ def evaluate(
     device: str = "cuda",
     batch_size: int = 32,
     max_length: int = 128,
+    contextual_pronouns: bool = True,
 ) -> dict:
     preds = predict(model, tokenizer, pairs, device, batch_size, max_length)
     labels = torch.tensor([p.label for p in pairs])
     acc = (preds == labels).float().mean().item()
 
     sub = subgroup_accuracy_gap(pairs, preds)
-    flip = prediction_flip_rate(model, tokenizer, pairs, device, batch_size, max_length)
+    flip = prediction_flip_rate(
+        model, tokenizer, pairs, device, batch_size, max_length, contextual_pronouns
+    )
 
     return {
         "accuracy": acc,
@@ -104,4 +110,5 @@ def evaluate(
         "flips": flip["flips"],
         "n_identity": flip["n_identity"],
         "n": len(pairs),
+        "contextual_pronouns": contextual_pronouns,
     }

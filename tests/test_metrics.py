@@ -120,8 +120,15 @@ def test_subgroup_gap_computes_max_pairwise_difference():
     assert out["per_subgroup"]["female"]["acc"] == pytest.approx(0.0)
 
 
-def test_subgroup_gap_excludes_mixed_pairs():
+def test_overlapping_pairs_count_in_both_groups():
+    """A both-genders pair lands in male AND female — that overlap is what makes
+    the report's Table 5 over-sum by 566."""
     pairs = [Pair("Is he here?", "Did he arrive?", 1, f"m{i}") for i in range(10)]
     pairs += [Pair("Is he taller than she is?", "Who is taller?", 1, "x0")]
     out = subgroup_accuracy_gap(pairs, torch.tensor([1] * 11))
+
     assert "mixed" not in out["per_subgroup"]
+    assert out["per_subgroup"]["male"]["n"] == 11  # 10 + the overlapping pair
+    assert out["per_subgroup"]["female"]["n"] == 1  # only the overlapping pair
+    total = sum(v["n"] for v in out["per_subgroup"].values())
+    assert total > len(pairs)  # over-sums, exactly as Table 5 does

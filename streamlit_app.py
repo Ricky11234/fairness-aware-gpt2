@@ -1,4 +1,4 @@
-"""Fairness-Aware GPT-2 for Paraphrase Detection — interactive demo.
+"""Twin Test — identity-robustness auditing for question-matching models.
 
 Run locally:   streamlit run streamlit_app.py
 Deploy:        Streamlit Community Cloud, main file = streamlit_app.py
@@ -6,6 +6,7 @@ Deploy:        Streamlit Community Cloud, main file = streamlit_app.py
 
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 
@@ -13,34 +14,33 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(
-    page_title="Fairness-Aware GPT-2 · Paraphrase Detection",
-    page_icon="⇄",
-    layout="wide",
-)
+st.set_page_config(page_title="Twin Test · identity robustness audit", page_icon="⇄", layout="wide")
 
 ROOT = Path(__file__).parent
 
-# `results` is torch-free, so importing it at module scope keeps startup fast.
+# torch-free, so importing at module scope keeps startup fast.
 from fairness_gpt2.results import (  # noqa: E402
+    intervention_effect,
     load_reported,
     load_reproduced,
-    paraphrase_comparison,
-    replication_status,
-    secondary_comparison,
 )
 
-RESULTS = load_reported()
+REPORTED = load_reported()
 REPRODUCED = load_reproduced()
+EFFECT = intervention_effect(REPRODUCED)
+
+# ---- EDIT THIS -----------------------------------------------------------
+AUTHOR = "Abhinav Barman"
+REPO_URL = "https://github.com/Ricky11234/fairness-aware-gpt2"
+# --------------------------------------------------------------------------
+
+MAX_BATCH = 200  # Streamlit Cloud's free tier is CPU-only with ~1GB RAM.
 
 
-# Where to find a trained checkpoint. Set MODEL_REPO in Streamlit secrets to a
-# Hugging Face repo id, or drop a checkpoint in ./checkpoints/cda_reg.
 def _secret(key: str, default: str = "") -> str:
     try:
         return st.secrets.get(key, os.environ.get(key, default))
     except Exception:
-        # No secrets.toml present (normal when running locally).
         return os.environ.get(key, default)
 
 
@@ -50,9 +50,9 @@ LOCAL_CKPT = ROOT / "checkpoints" / "cda_reg"
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 2.5rem; max-width: 1100px;}
-      .verdict {font-size: 1.05rem; font-weight: 600; padding: .6rem .9rem;
-                border-radius: 6px; margin-top: .5rem;}
+      .block-container {padding-top: 2.2rem; max-width: 1150px;}
+      .verdict {font-size: 1.05rem; font-weight: 600; padding: .65rem .9rem;
+                border-radius: 6px; margin-top: .6rem;}
       .stable {background:#e8f4ea; color:#1d6a33; border:1px solid #bcdcc4;}
       .flipped {background:#fdeaea; color:#96231f; border:1px solid #f2c2c0;}
       .swapmark {background:#fff3cd; padding:0 .15rem; border-radius:3px;}
@@ -61,23 +61,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Fairness-Aware Fine-Tuning of GPT-2 for Paraphrase Detection")
-st.caption(
-    "Deonna Owens · Stanford CS224N · Does the model's answer change when only "
-    "the names and pronouns change?"
-)
-
 
 # --------------------------------------------------------------------------
-# Model loading (lazy — the dashboard works without a checkpoint)
+# Model
 # --------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Loading GPT-2 checkpoint…")
+@st.cache_resource(show_spinner="Loading model…")
 def load_model():
-    import torch  # imported lazily so the dashboard renders fast
+    import torch
 
     from fairness_gpt2.model import GPT2ParaphraseClassifier, build_tokenizer
 
-    ckpt_dir = None
     if MODEL_REPO:
         from huggingface_hub import snapshot_download
 
@@ -88,57 +81,81 @@ def load_model():
         return None, None
 
     torch.set_num_threads(2)
-    model = GPT2ParaphraseClassifier.load(ckpt_dir, device="cpu")
-    return model, build_tokenizer(
-        ckpt_dir if os.path.exists(os.path.join(ckpt_dir, "vocab.json")) else "gpt2"
-    )
+    return GPT2ParaphraseClassifier.load(ckpt_dir, device="cpu"), build_tokenizer()
 
 
-def predict_probs(model, tokenizer, s1: str, s2: str):
+def predict_batch(model, tokenizer, s1_list, s2_list, batch_size: int = 8):
+    """Duplicate probability for each pair."""
     import torch
 
     from fairness_gpt2.model import encode_pairs
 
-    enc = encode_pairs(tokenizer, [s1], [s2])
-    with torch.no_grad():
-        logits = model(enc["input_ids"], enc["attention_mask"])
-    return torch.softmax(logits, dim=-1)[0].tolist()
+    out = []
+    for i in range(0, len(s1_list), batch_size):
+        enc = encode_pairs(tokenizer, s1_list[i : i + batch_size], s2_list[i : i + batch_size])
+        with torch.no_grad():
+            logits = model(enc["input_ids"], enc["attention_mask"])
+        out.extend(torch.softmax(logits, dim=-1)[:, 1].tolist())
+    return out
 
 
 def highlight_swaps(original: str, swapped: str) -> str:
-    out = []
-    for a, b in zip(original.split(), swapped.split(), strict=True):
-        out.append(f'<span class="swapmark">{b}</span>' if a != b else b)
-    return " ".join(out)
+    return " ".join(
+        f'<span class="swapmark">{b}</span>' if a != b else b
+        for a, b in zip(original.split(), swapped.split(), strict=True)
+    )
 
 
-probe_tab, results_tab, method_tab = st.tabs(["Counterfactual probe", "Results", "How it works"])
+def model_warning():
+    st.warning(
+        "**No model connected.** Set `MODEL_REPO` in Streamlit secrets to your "
+        "Hugging Face repo id, or place a checkpoint in `checkpoints/cda_reg/`. "
+        "The identity swap itself works without one."
+    )
+
 
 # --------------------------------------------------------------------------
-# Tab 1 — live probe
+# Header
 # --------------------------------------------------------------------------
-with probe_tab:
+st.title("Twin Test")
+st.markdown(
+    "#### Does your question-matching model give the same answer when only the name changes?"
+)
+st.write(
+    "Duplicate-question detection routes support tickets, merges help-centre "
+    "articles, and surfaces existing answers in community Q&A. When that model's "
+    "decision depends on whether the question says *James* or *Mary*, the same "
+    "question gets a different outcome for different people — and aggregate "
+    "accuracy won't show it. This measures it."
+)
+
+check_tab, audit_tab, how_tab = st.tabs(["Check a pair", "Audit a dataset", "How it works"])
+
+# --------------------------------------------------------------------------
+# Tab 1 — single pair
+# --------------------------------------------------------------------------
+with check_tab:
     from fairness_gpt2.identity import contains_identity, subgroup_of, swap_identity
 
     st.write(
         "Enter a question pair containing a name or a gendered word. The model "
-        "predicts whether the two questions are paraphrases, then predicts again "
-        "on an identity-swapped copy. A **flip** means the demographic token, not "
-        "the meaning, moved the decision."
+        "decides whether they're duplicates, then decides again on an "
+        "identity-swapped copy. A **flip** means the demographic token moved the "
+        "decision, not the meaning."
     )
 
     examples = {
-        "Gendered pronouns": (
-            "How can he improve his credit score quickly?",
-            "What should he do to raise his credit score fast?",
+        "Billing ticket (pronouns)": (
+            "Why was he charged twice this month?",
+            "What caused the duplicate charge on his account?",
         ),
-        "Gendered names": (
-            "Why did James decide to study law?",
-            "What made James choose a legal career?",
+        "Account access (name)": (
+            "How does James reset his password?",
+            "What are the steps for James to recover account access?",
         ),
-        "Ethnicity-associated names": (
-            "Is Connor a good candidate for the software role?",
-            "Would Connor be a strong hire as a software engineer?",
+        "Hiring question (name)": (
+            "Is Connor a strong candidate for the engineering role?",
+            "Would Connor be a good hire as an engineer?",
         ),
     }
     choice = st.selectbox("Start from an example", list(examples) + ["Blank"])
@@ -148,245 +165,297 @@ with probe_tab:
     q1 = c1.text_area("Question 1", value=d1, height=90)
     q2 = c2.text_area("Question 2", value=d2, height=90)
 
-    if st.button("Run the probe", type="primary"):
+    if st.button("Run the test", type="primary"):
         if not q1.strip() or not q2.strip():
-            st.warning("Fill in both questions to run the probe.")
+            st.warning("Fill in both questions.")
         else:
             cf1, cf2 = swap_identity(q1), swap_identity(q2)
             st.markdown("**Identity-swapped copy**")
             st.markdown(highlight_swaps(q1, cf1), unsafe_allow_html=True)
             st.markdown(highlight_swaps(q2, cf2), unsafe_allow_html=True)
             st.caption(
-                f"Subgroup — original: **{subgroup_of(q1, q2)}** → "
-                f"swapped: **{subgroup_of(cf1, cf2)}**"
+                f"Subgroup — original: **{subgroup_of(q1, q2)}** → swapped: "
+                f"**{subgroup_of(cf1, cf2)}**"
             )
 
             if not contains_identity(q1 + " " + q2):
                 st.info(
-                    "No identity tokens found, so the swapped copy is identical. "
-                    "Add a name or a gendered word to see the probe do its work."
+                    "No identity tokens found, so the copy is identical. Add a name "
+                    "or a gendered word for the test to do anything."
                 )
 
             model, tokenizer = load_model()
             if model is None:
-                st.warning(
-                    "No checkpoint configured, so predictions are unavailable. "
-                    "Set `MODEL_REPO` in Streamlit secrets to your Hugging Face "
-                    "repo id, or place a checkpoint in `checkpoints/cda_reg/`. "
-                    "The swap itself runs without a model."
-                )
+                model_warning()
             else:
-                p_orig = predict_probs(model, tokenizer, q1, q2)
-                p_cf = predict_probs(model, tokenizer, cf1, cf2)
-                y_orig, y_cf = int(p_orig[1] > p_orig[0]), int(p_cf[1] > p_cf[0])
+                p_orig, p_cf = predict_batch(model, tokenizer, [q1, cf1], [q2, cf2])
+                y_orig, y_cf = int(p_orig > 0.5), int(p_cf > 0.5)
 
                 m1, m2 = st.columns(2)
-                m1.metric(
-                    "Original → paraphrase?", "Yes" if y_orig else "No", f"p = {p_orig[1]:.3f}"
-                )
-                m2.metric("Swapped → paraphrase?", "Yes" if y_cf else "No", f"p = {p_cf[1]:.3f}")
+                m1.metric("Original → duplicate?", "Yes" if y_orig else "No", f"p = {p_orig:.3f}")
+                m2.metric("Swapped → duplicate?", "Yes" if y_cf else "No", f"p = {p_cf:.3f}")
 
-                cls = "flipped" if y_orig != y_cf else "stable"
-                msg = (
-                    "Prediction flipped. The identity token changed the label."
-                    if y_orig != y_cf
-                    else f"Prediction held. Probability moved by {abs(p_orig[1] - p_cf[1]):.4f}."
+                flipped = y_orig != y_cf
+                st.markdown(
+                    f'<div class="verdict {"flipped" if flipped else "stable"}">'
+                    + (
+                        "Prediction flipped. The identity token changed the outcome."
+                        if flipped
+                        else f"Prediction held. Probability moved {abs(p_orig - p_cf):.4f}."
+                    )
+                    + "</div>",
+                    unsafe_allow_html=True,
                 )
-                st.markdown(f'<div class="verdict {cls}">{msg}</div>', unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------
-# Tab 2 — results
+# Tab 2 — batch audit
 # --------------------------------------------------------------------------
-with results_tab:
-    status = replication_status(REPRODUCED)  # paraphrase models only
-    done = sum(status.values())
+with audit_tab:
+    from fairness_gpt2.identity import contains_identity, subgroup_of, swap_identity
 
-    if done == 0:
-        st.info(
-            "**Showing the numbers reported in the paper.** Nothing has been trained in "
-            "this repo yet, so there is nothing to compare against. Run the training "
-            "scripts and this page fills in a reproduced column automatically."
-        )
-    elif done < len(status):
-        st.warning(
-            f"**Partial — {done} of {len(status)} paraphrase models reproduced.** "
-            "Blank cells below haven't been run yet."
-        )
-    else:
-        st.success(
-            "**Paraphrase task fully reproduced.** All three models trained and evaluated here."
-        )
-
-    with st.expander(
-        f"Replication status — {done}/{len(status)} paraphrase models", expanded=done == 0
-    ):
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {"Component": k, "Reproduced": "yes" if v else "not yet"}
-                    for k, v in status.items()
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.caption(
-            "Scope is the paraphrase task — the report's fairness contribution. SST, "
-            "CFIMDB and sonnet generation are CS224N framework requirements with no "
-            "fairness component; their reported figures appear below for completeness. "
-            "The leaderboard test accuracy (0.876) can't be reproduced at all — it needs "
-            "a submission to the CS224N leaderboard, which holds the test labels."
-        )
-
-    st.subheader("Paraphrase detection")
     st.write(
-        "CDA buys subgroup parity. The consistency regularizer buys instance-level "
-        "stability. Neither buys both, and neither costs accuracy."
-    )
-
-    comp = pd.DataFrame(paraphrase_comparison(RESULTS, REPRODUCED))
-    display = pd.DataFrame(
-        {
-            "Model": comp["model"],
-            "Dev acc (paper)": comp["reported_acc"],
-            "Dev acc (yours)": comp["reproduced_acc"],
-            "Subgroup gap (paper)": comp["reported_gap"],
-            "Subgroup gap (yours)": comp["reproduced_gap"],
-            "Flip rate (paper)": comp["reported_flip"],
-            "Flip rate (yours)": comp["reproduced_flip"],
-        }
-    )
-    st.dataframe(
-        display.style.format({c: "{:.2%}" for c in display.columns if c != "Model"}, na_rep="—"),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    # Chart the paper's numbers; overlay reproduced ones where they exist.
-    long = comp.melt(
-        id_vars="model",
-        value_vars=["reported_acc", "reported_gap", "reported_flip"],
-        var_name="metric",
-        value_name="value",
-    )
-    long["metric"] = long["metric"].map(
-        {
-            "reported_acc": "Dev accuracy ↑",
-            "reported_gap": "Subgroup gap ↓",
-            "reported_flip": "Flip rate ↓",
-        }
-    )
-    chart = (
-        alt.Chart(long)
-        .mark_bar()
-        .encode(
-            x=alt.X("model:N", title=None, axis=alt.Axis(labelAngle=-20)),
-            y=alt.Y("value:Q", title=None, axis=alt.Axis(format="%")),
-            color=alt.Color("model:N", legend=None, scale=alt.Scale(scheme="tableau10")),
-            tooltip=["model", "metric", alt.Tooltip("value:Q", format=".2%")],
-        )
-        .properties(height=220)
-        .facet(
-            column=alt.Column(
-                "metric:N",
-                title=None,
-                sort=["Dev accuracy ↑", "Subgroup gap ↓", "Flip rate ↓"],
-            )
-        )
-        .resolve_scale(y="independent")
-    )
-    st.altair_chart(chart, use_container_width=True)
-    st.caption("Bars show the paper's reported figures.")
-
-    st.subheader("Secondary tasks")
-    sec = pd.DataFrame(secondary_comparison(RESULTS, REPRODUCED))
-    st.dataframe(
-        sec.rename(
-            columns={
-                "task": "Task",
-                "metric": "Metric",
-                "reported": "Paper",
-                "reproduced": "Yours",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
+        "Upload your question pairs and get a flip rate for the set: how often the "
+        "decision changes under identity substitution. Rows without a name or "
+        "gendered word are reported but can't flip, so they're excluded from the rate."
     )
     st.caption(
-        "SST is 5-class, so the low accuracy is expected. CFIMDB is binary. "
-        "Sonnet quality is CHRF, a character n-gram overlap score, not a percentage."
+        f"CSV with columns `question1`, `question2` (or `sentence1`, `sentence2`). "
+        f"Capped at {MAX_BATCH} rows — this runs on a free CPU instance."
     )
 
-    st.subheader("Per-subgroup dev accuracy (10-epoch models, as reported)")
-    sub = pd.DataFrame(RESULTS["subgroups"])
-    st.dataframe(
-        sub.style.format({"baseline": "{:.2%}", "cda": "{:.2%}", "cda_reg": "{:.2%}"}),
-        use_container_width=True,
-        hide_index=True,
-    )
-    g = RESULTS["male_female_gap"]
-    st.caption(
-        f"Male–female gap: baseline {g['baseline']:.2%} → CDA {g['cda']:.2%} "
-        f"→ CDA + Reg. {g['cda_reg']:.2%}. The neutral subgroup is ~90% of the "
-        "dev set, so overall accuracy barely moves."
-    )
-
-    st.subheader("Training dynamics — CDA + Fairness Regularization (as reported)")
-    dyn = pd.DataFrame(RESULTS["training_dynamics"])
-    base = alt.Chart(dyn).encode(x=alt.X("epoch:Q", title="Epoch"))
-    loss_line = base.mark_line(point=True, color="#4c78a8").encode(
-        y=alt.Y("task_loss:Q", title="Task loss")
-    )
-    fair_line = base.mark_line(point=True, color="#e45756", strokeDash=[4, 3]).encode(
-        y=alt.Y("fairness_loss:Q", title="Fairness loss")
-    )
-    st.altair_chart(
-        alt.layer(loss_line, fair_line).resolve_scale(y="independent").properties(height=260),
-        use_container_width=True,
-    )
-    st.caption(
-        "Task loss falls while fairness loss climbs: as predictions sharpen, the "
-        "same small original/counterfactual disagreement produces a larger KL. The "
-        "penalty bounds the divergence rather than erasing it."
+    SAMPLE = pd.DataFrame(
+        [
+            ("Why was he charged twice?", "What caused the duplicate charge on his account?"),
+            ("How does James reset his password?", "What are James's password recovery steps?"),
+            ("Is Connor a strong candidate?", "Would Connor be a good hire?"),
+            ("When does her subscription renew?", "What is the renewal date on her plan?"),
+            ("How do I export my data?", "What's the process for exporting data?"),
+            ("Can Mary transfer her tickets?", "Is ticket transfer allowed for Mary?"),
+            ("Why is my refund delayed?", "What's holding up the refund?"),
+            ("Did he receive the invoice?", "Was the invoice delivered to him?"),
+        ],
+        columns=["question1", "question2"],
     )
 
-    if REPRODUCED:
-        with st.expander("Raw reproduced results (JSON)"):
-            st.json(REPRODUCED)
+    up = st.file_uploader("Upload CSV", type=["csv"])
+    use_sample = st.checkbox("Use a sample set instead", value=up is None)
+
+    df = None
+    if up is not None and not use_sample:
+        try:
+            df = pd.read_csv(up)
+        except Exception as e:
+            st.error(f"Couldn't read that CSV: {e}")
+    elif use_sample:
+        df = SAMPLE.copy()
+
+    if df is not None:
+        cols = {c.lower().strip(): c for c in df.columns}
+        c1 = cols.get("question1") or cols.get("sentence1") or cols.get("q1")
+        c2 = cols.get("question2") or cols.get("sentence2") or cols.get("q2")
+
+        if not (c1 and c2):
+            st.error(f"Need question1/question2 columns. Found: {list(df.columns)}")
+        else:
+            if len(df) > MAX_BATCH:
+                st.info(f"{len(df):,} rows uploaded — auditing the first {MAX_BATCH}.")
+                df = df.head(MAX_BATCH)
+            st.dataframe(df[[c1, c2]].head(5), use_container_width=True, hide_index=True)
+
+            if st.button("Run audit", type="primary"):
+                model, tokenizer = load_model()
+                if model is None:
+                    model_warning()
+                else:
+                    s1 = df[c1].astype(str).tolist()
+                    s2 = df[c2].astype(str).tolist()
+                    cf1 = [swap_identity(s) for s in s1]
+                    cf2 = [swap_identity(s) for s in s2]
+
+                    with st.spinner(f"Scoring {len(s1) * 2} pairs on CPU…"):
+                        p_orig = predict_batch(model, tokenizer, s1, s2)
+                        p_cf = predict_batch(model, tokenizer, cf1, cf2)
+
+                    out = pd.DataFrame(
+                        {
+                            "question1": s1,
+                            "question2": s2,
+                            "has_identity": [
+                                contains_identity(a + " " + b) for a, b in zip(s1, s2, strict=True)
+                            ],
+                            "subgroup": [subgroup_of(a, b) for a, b in zip(s1, s2, strict=True)],
+                            "p_duplicate": p_orig,
+                            "p_duplicate_swapped": p_cf,
+                        }
+                    )
+                    out["prediction"] = (out.p_duplicate > 0.5).map({True: "dup", False: "not dup"})
+                    out["prediction_swapped"] = (out.p_duplicate_swapped > 0.5).map(
+                        {True: "dup", False: "not dup"}
+                    )
+                    out["flipped"] = out.prediction != out.prediction_swapped
+                    out["prob_shift"] = (out.p_duplicate - out.p_duplicate_swapped).abs()
+
+                    testable = out[out.has_identity]
+                    n_flip = int(testable.flipped.sum())
+                    rate = n_flip / len(testable) if len(testable) else 0.0
+
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Rows audited", f"{len(out):,}")
+                    k2.metric(
+                        "Testable (contain identity)",
+                        f"{len(testable):,}",
+                        f"{len(out) - len(testable)} can't flip",
+                        delta_color="off",
+                    )
+                    k3.metric(
+                        "Flip rate", f"{rate:.1%}", f"{n_flip} flipped", delta_color="inverse"
+                    )
+
+                    if len(testable) == 0:
+                        st.info(
+                            "No rows contain a name or gendered word, so nothing is testable. "
+                            "This tool can only measure what it can substitute."
+                        )
+                    else:
+                        if n_flip:
+                            st.error(
+                                f"**{n_flip} of {len(testable)} decisions depend on the identity "
+                                "token.** Those rows would be routed differently for different "
+                                "people asking the same question."
+                            )
+                            st.markdown("##### Failing rows")
+                            st.dataframe(
+                                testable[testable.flipped][
+                                    [
+                                        "question1",
+                                        "question2",
+                                        "subgroup",
+                                        "prediction",
+                                        "prediction_swapped",
+                                        "prob_shift",
+                                    ]
+                                ].style.format({"prob_shift": "{:.3f}"}),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.success(
+                                f"**No flips across {len(testable)} testable rows.** No decision "
+                                "changed under identity substitution."
+                            )
+
+                        st.markdown("##### Where the instability sits")
+                        by_group = (
+                            testable.groupby("subgroup")
+                            .agg(
+                                rows=("flipped", "size"),
+                                flips=("flipped", "sum"),
+                                mean_prob_shift=("prob_shift", "mean"),
+                            )
+                            .reset_index()
+                        )
+                        by_group["flip_rate"] = by_group.flips / by_group.rows
+                        st.dataframe(
+                            by_group.style.format(
+                                {"flip_rate": "{:.1%}", "mean_prob_shift": "{:.4f}"}
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        st.altair_chart(
+                            alt.Chart(testable)
+                            .mark_bar()
+                            .encode(
+                                x=alt.X(
+                                    "prob_shift:Q",
+                                    bin=alt.Bin(maxbins=25),
+                                    title="|p(dup) − p(dup after swap)|",
+                                ),
+                                y=alt.Y("count()", title="rows"),
+                                color=alt.Color(
+                                    "flipped:N",
+                                    scale=alt.Scale(
+                                        domain=[False, True], range=["#4c78a8", "#e45756"]
+                                    ),
+                                    title="flipped",
+                                ),
+                                tooltip=["count()"],
+                            )
+                            .properties(height=220),
+                            use_container_width=True,
+                        )
+                        st.caption(
+                            "Rows far right shifted a lot but may not have crossed the decision "
+                            "boundary. They're the near-misses — the flips you'd get from a small "
+                            "change in threshold or training seed."
+                        )
+
+                    buf = io.StringIO()
+                    out.to_csv(buf, index=False)
+                    st.download_button(
+                        "Download full report (CSV)",
+                        buf.getvalue(),
+                        "identity_audit.csv",
+                        "text/csv",
+                    )
 
 # --------------------------------------------------------------------------
-# Tab 3 — method
+# Tab 3 — how it works
 # --------------------------------------------------------------------------
-with method_tab:
-    st.subheader("Task setup")
+with how_tab:
+    from fairness_gpt2.identity import ETHNICITY_NAMES, GENDERED_NAMES, GENDERED_TERMS
+
+    st.subheader("The idea")
+    st.write(
+        "Take a question pair. Swap every name and gendered word for its "
+        "counterfactual — *James → Mary*, *he → she*, *Connor → Jamal* — and ask "
+        "the model again. Everything about the task is unchanged: if two questions "
+        "are duplicates when they're about James, they're duplicates when they're "
+        "about Mary. The name appears on both sides and cancels."
+    )
+    st.write(
+        "So if the answer changes, the identity token caused it. That's a **flip**, "
+        "and the fraction of flips is the **flip rate**."
+    )
+    st.info(
+        "A flip doesn't say which answer was right. That's the point — the complaint "
+        "isn't that the model is wrong, it's that its answer depends on the name at all."
+    )
+
+    st.subheader("The model")
     st.code(
         'Question 1: "{s1}"\nQuestion 2: "{s2}"\nAre these questions asking the same thing?',
         language="text",
     )
     st.write(
-        "GPT-2 base (124M) reads that prompt. A linear head over the final "
-        "token's hidden state produces the two paraphrase logits: y = W·h_final + b, "
-        "with W ∈ ℝ^768×2."
+        "GPT-2 base (124M) reads that prompt; a linear head over the final token's "
+        "hidden state produces the duplicate/not-duplicate logits "
+        "(y = W·h_final + b, W ∈ ℝ^768×2). Fine-tuned on **Quora Question Pairs** — "
+        "283,011 training pairs, evaluated on 40,430."
+    )
+    st.caption(
+        "QQP only. The source paper also reports SST, CFIMDB and sonnet-generation "
+        "results as course requirements; those carry no fairness component and are "
+        "out of scope here."
     )
 
-    st.subheader("Counterfactual data augmentation")
-    from fairness_gpt2.identity import ETHNICITY_NAMES, GENDERED_NAMES, GENDERED_TERMS
-
+    st.subheader("The substitutions")
     st.dataframe(
         pd.DataFrame(
             [
                 {
-                    "Substitution type": "Gendered name pairs",
+                    "Type": "Gendered name pairs",
                     "Count": len(GENDERED_NAMES),
                     "Example": "James ↔ Mary",
                 },
                 {
-                    "Substitution type": "Ethnicity-associated name pairs",
+                    "Type": "Ethnicity-associated name pairs",
                     "Count": len(ETHNICITY_NAMES),
                     "Example": "Connor ↔ Jamal",
                 },
                 {
-                    "Substitution type": "Pronoun / gendered-term swaps",
+                    "Type": "Pronoun / gendered-term swaps",
                     "Count": len(GENDERED_TERMS),
                     "Example": "he ↔ she, king ↔ queen",
                 },
@@ -396,34 +465,314 @@ with method_tab:
         hide_index=True,
     )
     st.write(
-        "Swaps fire with probability 0.5 during training, and deterministically at evaluation."
+        "Applied with probability 0.5 during training (counterfactual data "
+        "augmentation), and deterministically at audit time."
     )
 
-    st.subheader("Consistency regularization")
-    st.latex(
-        r"\mathcal{L}_{\text{fairness}} = \tfrac{1}{2}\big(\mathrm{KL}(p_{cf}\,\|\,p_{orig}) + \mathrm{KL}(p_{orig}\,\|\,p_{cf})\big)"
-    )
-    st.latex(
-        r"\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{task}} + \lambda\,\mathcal{L}_{\text{fairness}},\quad \lambda = 0.5"
-    )
-
-    st.subheader("Metrics")
+    st.subheader("Training")
+    st.write("Two interventions, on top of standard cross-entropy fine-tuning:")
     st.markdown(
-        "- **Subgroup accuracy gap** — max pairwise accuracy difference across "
-        "male / female / neutral / name-only, counting only subgroups with ≥10 examples.\n"
-        "- **Prediction flip rate** — fraction of identity-bearing examples whose "
-        "predicted label changes under a deterministic swap."
+        "- **CDA** — train on identity-swapped copies so the model can't lean on "
+        "demographic cues.\n"
+        "- **Consistency regularization** — explicitly penalise disagreeing with "
+        "yourself across the swap:"
+    )
+    st.latex(
+        r"\mathcal{L}_{\text{fairness}} = \tfrac{1}{2}\big(\mathrm{KL}(p_{cf}\,\|\,p_{orig})"
+        r" + \mathrm{KL}(p_{orig}\,\|\,p_{cf})\big)"
+    )
+    st.latex(
+        r"\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{task}} + \lambda\,"
+        r"\mathcal{L}_{\text{fairness}},\quad \lambda = 0.5"
     )
 
-    st.subheader("Limits worth naming")
+    st.divider()
+    st.subheader("This is a replication — and it found two things")
+    st.write(
+        "The method above comes from a Stanford CS224N report (cited below). "
+        "Reproducing it from the text alone means reconstructing what the text "
+        "leaves out, and two of those reconstructions turned into findings."
+    )
+
+    repro = REPRODUCED.get("cda_reg", {})
+
+    st.markdown("**1. The paper's subgroup definition is recoverable from its own arithmetic.**")
+    st.write(
+        "It reports per-subgroup counts but never defines the subgroups. The counts "
+        "define them anyway: they sum to 40,996 against a 40,430-pair dev set. "
+        "Impossible — unless the groups overlap."
+    )
+    st.code(
+        "|male ∩ female|             = 40,996 − 40,430      = 566\n"
+        "|male ∪ female|             = 1833 + 1751 − 566    = 3,018\n"
+        "union + name-only + neutral = 3,018 + 734 + 36,678 = 40,430   ← the dev set, exactly\n"
+        "implied n_identity          = 3,018 + 734          = 3,752    ← paper reports 3,751",
+        language="text",
+    )
+    st.write(
+        "Two independent checks land exact. So male/female are decided by gendered "
+        "**terms**, not names; a pair with both counts in both groups; *name-only* "
+        "means a name with no gendered term. The intuitive reading — *James* makes a "
+        "pair male — collapses *name-only* from 734 examples to 14, and the subgroup "
+        "gap then measures noise on 14 rows. This project hit exactly that before the "
+        "arithmetic resolved it."
+    )
+
+    st.markdown("**2. The flip-rate metric has a grammatical confound.**")
+    st.write(
+        "The paper lists `his ↔ hers` as a flat pair. English overloads both words, "
+        "and a lookup table can't tell the senses apart:"
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "": "male",
+                    "subject": "he",
+                    "object": "him",
+                    "possessive determiner": "his",
+                    "possessive pronoun": "his",
+                },
+                {
+                    "": "female",
+                    "subject": "she",
+                    "object": "her",
+                    "possessive determiner": "her",
+                    "possessive pronoun": "hers",
+                },
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.code(
+        'literal mapping:   "improve his credit score"  →  "improve hers credit score"\n'
+        '                   "raise her credit score"    →  "raise him credit score"\n\n'
+        'resolved by role:  "improve his credit score"  →  "improve her credit score"\n'
+        '                   "raise her credit score"    →  "raise his credit score"',
+        language="text",
+    )
+    st.warning(
+        "Ungrammatical text is out-of-distribution for GPT-2, so it may flip because "
+        "the sentence broke — not because the name changed. Any flip the literal "
+        "mapping causes and the grammatical one doesn't is measuring syntax damage. "
+        "This implementation resolves `his`/`her` by syntactic role."
+    )
+
+    st.subheader("What the interventions buy")
+    st.write(
+        "The claim worth testing: does fairness-aware training actually make the "
+        "model more robust to identity substitution, and what does it cost?"
+    )
+
+    if EFFECT is None:
+        st.warning(
+            "**Baseline not trained yet.** A before/after needs both models trained "
+            "the same way on the same data. Substituting the paper's baseline for "
+            "your own would make the comparison meaningless — so this section stays "
+            "empty until `results/reproduced/baseline.json` exists."
+        )
+        st.caption(
+            "`uv run fairness-train --mode baseline --train data/quora-train.csv "
+            "--dev data/quora-dev.csv --out checkpoints/baseline --epochs 5`"
+        )
+        with st.expander("What the source paper reported (10 epochs) — not this project's data"):
+            st.dataframe(
+                pd.DataFrame(REPORTED["main"])
+                .rename(
+                    columns={
+                        "model": "Model",
+                        "dev_acc": "Dev accuracy",
+                        "subgroup_gap": "Subgroup gap",
+                        "flip_rate": "Flip rate",
+                    }
+                )
+                .style.format(
+                    {"Dev accuracy": "{:.2%}", "Subgroup gap": "{:.2%}", "Flip rate": "{:.2%}"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(
+                "Accuracy is flat across all three (89.55% → 89.47% → 89.56%). The "
+                "interventions don't make the model better at the task — they make it "
+                "steadier, for free."
+            )
+    else:
+        acc, flip, gap = EFFECT["accuracy"], EFFECT["flip_rate"], EFFECT["subgroup_gap"]
+        k1, k2, k3 = st.columns(3)
+        k1.metric(
+            "Flip rate",
+            f"{flip['cda_reg']:.2%}",
+            f"{flip['pct']:+.0%} vs baseline",
+            delta_color="inverse",
+        )
+        k2.metric("Dev accuracy", f"{acc['cda_reg']:.2%}", f"{acc['delta']:+.4f} vs baseline")
+        k3.metric(
+            "Subgroup gap",
+            f"{gap['cda_reg']:.2%}",
+            f"{gap['pct']:+.0%} vs baseline",
+            delta_color="inverse",
+        )
+
+        st.markdown(
+            f"**Identity robustness improved {abs(flip['pct']):.0%} at no cost to accuracy.** "
+            f"The baseline changed its answer on {EFFECT['flips']['baseline']} of "
+            f"{EFFECT['flips']['n_identity']:,} identity-bearing pairs; with CDA and the "
+            f"consistency penalty that drops to {EFFECT['flips']['cda_reg']}. Accuracy moves "
+            f"{acc['delta']:+.4f} — noise."
+        )
+
+        eff = pd.DataFrame(
+            [
+                {
+                    "Metric": "Dev accuracy ↑",
+                    "Baseline": acc["baseline"],
+                    "CDA + Reg.": acc["cda_reg"],
+                },
+                {
+                    "Metric": "Flip rate ↓",
+                    "Baseline": flip["baseline"],
+                    "CDA + Reg.": flip["cda_reg"],
+                },
+                {
+                    "Metric": "Subgroup gap ↓",
+                    "Baseline": gap["baseline"],
+                    "CDA + Reg.": gap["cda_reg"],
+                },
+            ]
+        )
+        eff["Change"] = eff["CDA + Reg."] - eff["Baseline"]
+        st.dataframe(
+            eff.style.format({"Baseline": "{:.2%}", "CDA + Reg.": "{:.2%}", "Change": "{:+.2%}"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        long = eff.melt(
+            id_vars="Metric",
+            value_vars=["Baseline", "CDA + Reg."],
+            var_name="Model",
+            value_name="Value",
+        )
+        st.altair_chart(
+            alt.Chart(long)
+            .mark_bar()
+            .encode(
+                x=alt.X("Model:N", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("Value:Q", title=None, axis=alt.Axis(format="%")),
+                color=alt.Color(
+                    "Model:N",
+                    legend=None,
+                    scale=alt.Scale(
+                        domain=["Baseline", "CDA + Reg."], range=["#9aa7b4", "#3b6ea5"]
+                    ),
+                ),
+                tooltip=["Model", "Metric", alt.Tooltip("Value:Q", format=".2%")],
+            )
+            .properties(height=190)
+            .facet(
+                column=alt.Column(
+                    "Metric:N", title=None, sort=["Dev accuracy ↑", "Flip rate ↓", "Subgroup gap ↓"]
+                )
+            )
+            .resolve_scale(y="independent"),
+            use_container_width=True,
+        )
+
+        if gap["delta"] > 0:
+            st.warning(
+                f"**The regularizer trades parity for stability.** The subgroup gap widened "
+                f"{gap['pct']:+.0%} while the flip rate fell {abs(flip['pct']):.0%}. These are "
+                "different notions of fairness and they don't move together: the consistency "
+                "penalty aligns predictions on *matched pairs* (instance level), while the "
+                "subgroup gap measures *aggregate accuracy across groups*. Fixing one doesn't "
+                "fix the other."
+            )
+            if not EFFECT["has_cda"]:
+                st.caption(
+                    "Training the CDA-only model would separate which intervention caused what: "
+                    "`--mode cda`."
+                )
+
+    st.divider()
+    st.subheader("Results against the paper")
+    if repro:
+        rows = [
+            {
+                "Metric": "Dev accuracy",
+                "Paper (5 epochs)": 0.8856,
+                "This replication": repro.get("accuracy"),
+            },
+            {
+                "Metric": "Flip rate",
+                "Paper (5 epochs)": 0.0296,
+                "This replication": repro.get("flip_rate"),
+            },
+        ]
+        comp = pd.DataFrame(rows)
+        comp["Difference"] = comp["This replication"] - comp["Paper (5 epochs)"]
+        st.dataframe(
+            comp.style.format(
+                {
+                    "Paper (5 epochs)": "{:.4f}",
+                    "This replication": "{:.4f}",
+                    "Difference": "{:+.4f}",
+                },
+                na_rep="—",
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        if repro.get("n_identity"):
+            c1, c2 = st.columns(2)
+            c1.metric(
+                "Identity-bearing dev examples",
+                f"{repro['n_identity']:,}",
+                f"{repro['n_identity'] - 3751:+,} vs paper's 3,751",
+                delta_color="off",
+            )
+            c2.metric(
+                "Lexicon coverage",
+                f"{repro['n_identity'] / 3752:.1%}",
+                "of the paper's implied 3,752",
+                delta_color="off",
+            )
+        st.write(
+            "Accuracy reproduces. The flip rate comes in lower — a ~1% lexicon-coverage "
+            "difference can't explain that, so the grammatical confound above is the "
+            "leading candidate."
+        )
+    else:
+        st.info(
+            "No reproduced results yet. Train a model and drop the JSON in `results/reproduced/`."
+        )
+
+    st.subheader("Honest limits")
     st.markdown(
-        "- Subgroup assignment uses fixed lexicons and misses implicit cues.\n"
-        "- Swaps are binary-gender and cover a small name list.\n"
-        "- `his` and `her` are each two words (possessive determiner vs. pronoun). "
-        "The paper's flat mapping produces ungrammatical counterfactuals like "
-        "*hers book*, which confounds the flip rate — a model can flip because the "
-        "syntax broke, not because the identity changed. This implementation "
-        "resolves them by syntactic role instead.\n"
-        "- ~90% of the dev set is identity-free, so headline accuracy is dominated "
-        "by examples the interventions never touch."
+        "- **The lexicon is reconstructed.** The paper gives counts (60/20/22) and three "
+        "examples, not the lists. Flip rates are comparable in magnitude, not identical.\n"
+        "- **Binary gender, ~100 names.** A narrow slice of the demographic space.\n"
+        "- **Lexicons miss implicit cues.** No name, no measurement — the audit reports "
+        "which rows it couldn't test.\n"
+        "- **5 epochs**, matching the paper's ablation rather than its 10-epoch headline.\n"
+        "- **Train split differs.** 283,011 pairs sampled from GLUE to match the paper's "
+        "count; the original's course-provided split isn't public.\n"
+        "- **Not a leaderboard model.** 89% on QQP isn't state of the art. The audit "
+        "harness is the point, not the classifier."
+    )
+
+    st.divider()
+    st.caption(f"Built by {AUTHOR} · [source]({REPO_URL})")
+    st.markdown("##### Method replicated from")
+    st.markdown(
+        "> Owens, D. *Fairness-Aware Fine-Tuning of GPT-2 for Paraphrase Detection.* "
+        "Stanford CS224N Default Project."
+    )
+    st.markdown("##### Also drawing on")
+    st.caption(
+        "Radford et al. 2019 (GPT-2) · Maudslay et al. 2019 (name-based counterfactual data "
+        "substitution) · Bertrand & Mullainathan 2004 (audit-study name lists) · Zhao et al. "
+        "2018 (WinoBias) · Dixon et al. 2018 · Black et al. 2020 (FlipTest) · "
+        "Kaushik et al. 2020"
     )

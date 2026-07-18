@@ -8,6 +8,7 @@ from fairness_gpt2.identity import (
     GENDERED_TERMS,
     contains_identity,
     subgroup_of,
+    subgroups_of,
     swap_identity,
 )
 
@@ -80,15 +81,33 @@ def test_contains_identity():
 @pytest.mark.parametrize(
     "s1,s2,expected",
     [
-        ("Is he tall?", "Was the king tall?", "male"),
-        ("Is she tall?", "Was the queen tall?", "female"),
-        ("Is Connor a good hire?", "Would Connor work out?", "name-only"),
-        ("How do I learn Python?", "Best way to learn Python?", "neutral"),
-        ("Is he taller than she is?", "Who is taller?", "mixed"),
+        ("Is he tall?", "Was the king tall?", {"male"}),
+        ("Is she tall?", "Was the queen tall?", {"female"}),
+        ("Is Connor a good hire?", "Would Connor work out?", {"name-only"}),
+        ("How do I learn Python?", "Best way to learn Python?", {"neutral"}),
+        # Both gendered terms -> BOTH groups. This overlap is what makes the
+        # report's Table 5 sum to 40,996 against a 40,430-pair dev set.
+        ("Is he taller than she is?", "Who is taller?", {"male", "female"}),
     ],
 )
 def test_subgroup_assignment(s1, s2, expected):
-    assert subgroup_of(s1, s2) == expected
+    assert subgroups_of(s1, s2) == expected
+
+
+def test_names_alone_are_name_only_not_gendered():
+    """Recovered from Table 5: names do NOT make a pair male/female. Treating
+    'James' as male collapses name-only from 734 examples to ~14, and the
+    subgroup gap then measures noise on a 14-example group."""
+    assert subgroups_of("Why did James study law?", "What made James choose law?") == {"name-only"}
+    assert subgroups_of("Is Mary here?", "Did Mary arrive?") == {"name-only"}
+
+
+def test_a_name_plus_a_gendered_term_is_gendered():
+    assert subgroups_of("Did James tell his brother?", "What did he say?") == {"male"}
+
+
+def test_subgroup_of_joins_overlapping_groups_for_display():
+    assert subgroup_of("Is he taller than she is?", "Who is taller?") == "female+male"
 
 
 @pytest.mark.parametrize(
