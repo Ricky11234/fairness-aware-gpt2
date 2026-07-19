@@ -1,4 +1,4 @@
-"""Twin Test — identity-robustness auditing for question-matching models.
+"""Blind Match — identity-robustness auditing for text-similarity / plagiarism detection.
 
 Run locally:   streamlit run streamlit_app.py
 Deploy:        Streamlit Community Cloud, main file = streamlit_app.py
@@ -14,11 +14,14 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Twin Test · identity robustness audit", page_icon="⇄", layout="wide")
+st.set_page_config(
+    page_title="Blind Match · plagiarism-checker fairness audit",
+    page_icon="⧉",
+    layout="wide",
+)
 
 ROOT = Path(__file__).parent
 
-# torch-free, so importing at module scope keeps startup fast.
 from fairness_gpt2.results import (  # noqa: E402
     intervention_effect,
     load_reported,
@@ -29,12 +32,12 @@ REPORTED = load_reported()
 REPRODUCED = load_reproduced()
 EFFECT = intervention_effect(REPRODUCED)
 
-# ---- EDIT THIS -----------------------------------------------------------
+# ---- EDIT THESE ----------------------------------------------------------
 AUTHOR = "Abhinav Barman"
 REPO_URL = "https://github.com/Ricky11234/fairness-aware-gpt2"
 # --------------------------------------------------------------------------
 
-MAX_BATCH = 200  # Streamlit Cloud's free tier is CPU-only with ~1GB RAM.
+MAX_BATCH = 200
 
 
 def _secret(key: str, default: str = "") -> str:
@@ -44,18 +47,108 @@ def _secret(key: str, default: str = "") -> str:
         return os.environ.get(key, default)
 
 
+# cda_reg is the shipped model; baseline is optional (enables side-by-side).
 MODEL_REPO = _secret("MODEL_REPO")
+BASELINE_REPO = _secret("BASELINE_REPO")
 LOCAL_CKPT = ROOT / "checkpoints" / "cda_reg"
+LOCAL_BASELINE = ROOT / "checkpoints" / "baseline"
 
+# --------------------------------------------------------------------------
+# Design system — aviation ops console.
+# Palette: deep slate "night ramp", signage amber, boarding-pass paper,
+# a go/hold pair (jade / signal-red) for the verdict. Type: a condensed
+# grotesque feel via system stacks, monospace for all machine output.
+# --------------------------------------------------------------------------
 st.markdown(
     """
     <style>
-      .block-container {padding-top: 2.2rem; max-width: 1150px;}
-      .verdict {font-size: 1.05rem; font-weight: 600; padding: .65rem .9rem;
-                border-radius: 6px; margin-top: .6rem;}
-      .stable {background:#e8f4ea; color:#1d6a33; border:1px solid #bcdcc4;}
-      .flipped {background:#fdeaea; color:#96231f; border:1px solid #f2c2c0;}
-      .swapmark {background:#fff3cd; padding:0 .15rem; border-radius:3px;}
+      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+      :root {
+        --ground:#e9ece4; --panel:#f3f5ef; --line:#cdd4c6;
+        --forest:#1f4d3a; --forest-deep:#143528; --forest-soft:#2f6b52;
+        --brass:#b08d3f; --brass-dim:#8f7132;
+        --paper:#f6f4ec; --ink:#20291f;
+        --go:#2f6b52; --go-bg:#e4efe7; --go-line:#bcd6c6;
+        --hold:#a23a2e; --hold-bg:#f6e7e3; --hold-line:#e3c1b8;
+        --mute:#6a7566;
+      }
+      .stApp {background:var(--ground);}
+      .block-container {padding-top:1.4rem; max-width:1180px;}
+
+      h1, h2, h3 {font-family:'Barlow Semi Condensed',sans-serif !important;
+                  letter-spacing:.01em;}
+      .stApp {font-family:'Inter',sans-serif;}
+
+      /* Departure-board header */
+      .board {
+        background:linear-gradient(160deg,var(--forest) 0%,var(--forest-deep) 100%);
+        border:1px solid var(--line); border-radius:10px;
+        padding:1.4rem 1.6rem; margin-bottom:.5rem;
+        box-shadow:0 10px 34px rgba(20,53,40,.22);
+      }
+      .board .eyebrow {
+        font-family:'IBM Plex Mono',monospace; font-size:.72rem;
+        letter-spacing:.28em; text-transform:uppercase; color:var(--brass);
+        margin-bottom:.5rem;
+      }
+      .board h1 {
+        color:var(--paper); font-size:2.5rem; line-height:1.02;
+        margin:0 0 .5rem 0; font-weight:700;
+      }
+      .board .tag {color:#c3d1c4; font-size:1.02rem; max-width:70ch; margin:0;}
+      .board .flip-strip {
+        font-family:'IBM Plex Mono',monospace; color:#d9b968;
+        font-size:.8rem; margin-top:.9rem; letter-spacing:.04em;
+        border-top:1px dashed rgba(214,201,168,.25); padding-top:.8rem;
+      }
+
+      /* Mission card — the "what this is / isn't" box */
+      .mission {
+        background:var(--paper); color:var(--ink);
+        border-left:4px solid var(--forest-soft); border-radius:6px;
+        padding:1.1rem 1.3rem; margin:.4rem 0 .2rem;
+      }
+      .mission b {color:var(--forest);}
+
+      /* Boarding-pass pair */
+      .pass {
+        font-family:'IBM Plex Mono',monospace;
+        background:var(--paper); color:var(--ink);
+        border:1px solid #d9d3c4; border-radius:8px;
+        padding:.7rem .95rem; margin:.3rem 0;
+        position:relative;
+      }
+      .pass .rt {font-size:.62rem; letter-spacing:.2em; text-transform:uppercase;
+                 color:#9a8f78; display:block; margin-bottom:.2rem;}
+      .swapmark {background:var(--brass); color:#2a2008; padding:0 .2rem;
+                 border-radius:3px; font-weight:600;}
+
+      /* Verdict */
+      .verdict {font-family:'Barlow Semi Condensed',sans-serif;
+                font-size:1.15rem; font-weight:700; padding:.7rem 1rem;
+                border-radius:6px; margin-top:.6rem; letter-spacing:.02em;}
+      .hold {background:var(--hold-bg); color:var(--hold); border:1px solid var(--hold-line);}
+      .go   {background:var(--go-bg);   color:var(--go);   border:1px solid var(--go-line);}
+
+      /* Glossary chips */
+      .gl {border-bottom:1px dotted var(--brass-dim); cursor:help;}
+
+      /* Model column headers */
+      .modelhdr {font-family:'IBM Plex Mono',monospace; font-size:.72rem;
+                 letter-spacing:.16em; text-transform:uppercase;
+                 padding:.25rem .5rem; border-radius:4px; display:inline-block;}
+      .m-base {background:#dfe4d9; color:#55604f; border:1px solid #c8d0be;}
+      .m-reg  {background:var(--forest-deep); color:#d9b968;}
+
+
+      .stButton>button[kind="primary"] {
+        background:var(--forest) !important; border:1px solid var(--forest-deep) !important;
+        color:var(--paper) !important; font-family:'Barlow Semi Condensed',sans-serif;
+        letter-spacing:.02em; font-weight:600;
+      }
+      .stButton>button[kind="primary"]:hover {background:var(--forest-soft) !important;}
+      section[data-testid="stSidebar"] {display:none;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -63,29 +156,45 @@ st.markdown(
 
 
 # --------------------------------------------------------------------------
-# Model
+# Models. cda_reg always; baseline too when configured -> side-by-side.
 # --------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Loading model…")
-def load_model():
+def _resolve(repo: str, local: Path):
+    if repo:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(repo_id=repo)
+    if local.exists():
+        return str(local)
+    return None
+
+
+@st.cache_resource(show_spinner="Loading the fairness-tuned model…")
+def load_primary():
     import torch
 
     from fairness_gpt2.model import GPT2ParaphraseClassifier, build_tokenizer
 
-    if MODEL_REPO:
-        from huggingface_hub import snapshot_download
-
-        ckpt_dir = snapshot_download(repo_id=MODEL_REPO)
-    elif LOCAL_CKPT.exists():
-        ckpt_dir = str(LOCAL_CKPT)
-    else:
+    d = _resolve(MODEL_REPO, LOCAL_CKPT)
+    if not d:
         return None, None
-
     torch.set_num_threads(2)
-    return GPT2ParaphraseClassifier.load(ckpt_dir, device="cpu"), build_tokenizer()
+    return GPT2ParaphraseClassifier.load(d, device="cpu"), build_tokenizer()
 
 
-def predict_batch(model, tokenizer, s1_list, s2_list, batch_size: int = 8):
-    """Duplicate probability for each pair."""
+@st.cache_resource(show_spinner="Loading the baseline model…")
+def load_baseline():
+    import torch
+
+    from fairness_gpt2.model import GPT2ParaphraseClassifier, build_tokenizer
+
+    d = _resolve(BASELINE_REPO, LOCAL_BASELINE)
+    if not d:
+        return None, None
+    torch.set_num_threads(2)
+    return GPT2ParaphraseClassifier.load(d, device="cpu"), build_tokenizer()
+
+
+def dup_prob(model, tokenizer, s1_list, s2_list, batch_size: int = 8):
     import torch
 
     from fairness_gpt2.model import encode_pairs
@@ -106,115 +215,236 @@ def highlight_swaps(original: str, swapped: str) -> str:
     )
 
 
+def glossary(term: str, definition: str) -> str:
+    return f'<span class="gl" title="{definition}">{term}</span>'
+
+
 def model_warning():
     st.warning(
-        "**No model connected.** Set `MODEL_REPO` in Streamlit secrets to your "
-        "Hugging Face repo id, or place a checkpoint in `checkpoints/cda_reg/`. "
-        "The identity swap itself works without one."
+        "**No model connected.** Set `MODEL_REPO` in the app's secrets to your "
+        "Hugging Face repo id (and `BASELINE_REPO` for the side-by-side "
+        "comparison), or drop checkpoints in `checkpoints/`. The identity swap "
+        "runs without a model."
     )
 
 
 # --------------------------------------------------------------------------
-# Header
+# Header — departure board
 # --------------------------------------------------------------------------
-st.title("Twin Test")
+_flip_line = ""
+if EFFECT:
+    f = EFFECT["flip_rate"]
+    _flip_line = (
+        f"FAIRNESS TUNING ▸ IDENTITY-DRIVEN VERDICT FLIPS  {f['baseline']:.1%} → "
+        f"{f['cda_reg']:.1%}   ({f['pct']:+.0%})"
+    )
+else:
+    _flip_line = "FAIRNESS TUNING ▸ CONNECT A MODEL TO SEE LIVE RESULTS"
+
 st.markdown(
-    "#### Does your question-matching model give the same answer when only the name changes?"
-)
-st.write(
-    "Duplicate-question detection routes support tickets, merges help-centre "
-    "articles, and surfaces existing answers in community Q&A. When that model's "
-    "decision depends on whether the question says *James* or *Mary*, the same "
-    "question gets a different outcome for different people — and aggregate "
-    "accuracy won't show it. This measures it."
+    f"""
+    <div class="board">
+      <div class="eyebrow">⧉ Academic Integrity · Text-Similarity Matching · Fairness Audit</div>
+      <h1>Blind&nbsp;Match</h1>
+      <p class="tag">Plagiarism checkers like Turnitin and Copyscape rest on one
+      operation: deciding whether two passages say the same thing. This audits that
+      operation for a single failure — does the similarity verdict stay the same when
+      only the author's name or gender changes? An identical passage should be judged
+      identical whether it is signed <i>James</i> or <i>Mary</i>.</p>
+      <div class="flip-strip">{_flip_line}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-check_tab, audit_tab, how_tab = st.tabs(["Check a pair", "Audit a dataset", "How it works"])
+st.markdown(
+    """
+    <div class="mission">
+      <b>What this tool is for.</b> It does <b>not</b> try to catch plagiarism, and it
+      makes no claim about whether two passages are "really" a match. It checks one
+      narrower, more important thing: that the similarity verdict does not move when an
+      author named <i>James</i> becomes <i>Mary</i>, or <i>he</i> becomes <i>she</i>.
+      The same passage should draw the same flag no matter whose name is on it. A
+      detector can look accurate on average and still, quietly, flag one student and
+      clear an identical submission from another. This surfaces that.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Glossary strip — plain definitions, always visible on hover.
+g1 = glossary(
+    "flip",
+    "The similarity verdict changed after only the author's name or gender was swapped. One flip = one student flagged (or cleared) for who they are, not what they wrote.",
+)
+g2 = glossary(
+    "flip rate",
+    "Of all passages carrying a name or gendered word, the share whose verdict flipped under the swap. Lower is fairer; 0% = perfectly identity-blind.",
+)
+g3 = glossary(
+    "p",
+    "The model's confidence, from 0 to 1, that two passages say the same thing. Above 0.50 = flagged as a match. This is a probability, not a statistical p-value.",
+)
+g4 = glossary(
+    "subgroup",
+    "Which identity a passage carries: male / female (from pronouns or gendered words), name-only (a name, no gendered word), or neutral.",
+)
+st.markdown(
+    f"<div style='font-size:.86rem;color:#5a6673;margin:.5rem 0 0;'>"
+    f"Hover any term for a plain-English definition: {g1} · {g2} · {g3} · {g4}"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
+st.write("")
+check_tab, audit_tab, how_tab = st.tabs(
+    ["  Check one message  ", "  Audit a batch  ", "  How it works  "]
+)
+
 
 # --------------------------------------------------------------------------
-# Tab 1 — single pair
+# Tab 1 — single message, both models side by side
 # --------------------------------------------------------------------------
 with check_tab:
     from fairness_gpt2.identity import contains_identity, subgroup_of, swap_identity
 
-    st.write(
-        "Enter a question pair containing a name or a gendered word. The model "
-        "decides whether they're duplicates, then decides again on an "
-        "identity-swapped copy. A **flip** means the demographic token moved the "
-        "decision, not the meaning."
+    st.markdown(
+        "Enter two passages — say, a student submission and a source. The tool swaps "
+        "the author's identity in both, then asks each model — the plain **baseline** "
+        "and our **fairness-tuned** model — whether they match, before and after the "
+        "swap. A "
+        f"{glossary('flip', 'verdict changed after only the identity changed')} is a "
+        "passage judged differently for a different author.",
+        unsafe_allow_html=True,
     )
 
     examples = {
-        "Billing ticket (pronouns)": (
-            "Why was he charged twice this month?",
-            "What caused the duplicate charge on his account?",
+        "Essay vs. source (paraphrased)": (
+            "In his essay, James argues the revolution was driven mainly by economic grievance.",
+            "James claims economic hardship was the primary force behind the uprising.",
         ),
-        "Account access (name)": (
-            "How does James reset his password?",
-            "What are the steps for James to recover account access?",
+        "Two student submissions": (
+            "Mary explains that photosynthesis converts light energy into chemical energy in plants.",
+            "According to Mary, plants turn light into chemical energy through photosynthesis.",
         ),
-        "Hiring question (name)": (
-            "Is Connor a strong candidate for the engineering role?",
-            "Would Connor be a good hire as an engineer?",
+        "Lab report similarity": (
+            "Connor concludes his results confirm the hypothesis within the margin of error.",
+            "Connor states the findings support the hypothesis, allowing for experimental error.",
         ),
     }
-    choice = st.selectbox("Start from an example", list(examples) + ["Blank"])
+    choice = st.selectbox("Start from a real integrity-check scenario", list(examples) + ["Blank"])
     d1, d2 = examples.get(choice, ("", ""))
 
     c1, c2 = st.columns(2)
-    q1 = c1.text_area("Question 1", value=d1, height=90)
-    q2 = c2.text_area("Question 2", value=d2, height=90)
+    q1 = c1.text_area("Passage 1", value=d1, height=90)
+    q2 = c2.text_area("Passage 2", value=d2, height=90)
 
-    if st.button("Run the test", type="primary"):
+    if st.button("Run the fairness check", type="primary"):
         if not q1.strip() or not q2.strip():
-            st.warning("Fill in both questions.")
+            st.warning("Enter both passages.")
         else:
             cf1, cf2 = swap_identity(q1), swap_identity(q2)
-            st.markdown("**Identity-swapped copy**")
-            st.markdown(highlight_swaps(q1, cf1), unsafe_allow_html=True)
-            st.markdown(highlight_swaps(q2, cf2), unsafe_allow_html=True)
-            st.caption(
-                f"Subgroup — original: **{subgroup_of(q1, q2)}** → swapped: "
-                f"**{subgroup_of(cf1, cf2)}**"
+
+            st.markdown("###### Original vs identity-swapped")
+            b1, b2 = st.columns(2)
+            with b1:
+                st.markdown(
+                    f'<div class="pass"><span class="rt">As written</span>{q1}</div>'
+                    f'<div class="pass"><span class="rt">As written</span>{q2}</div>',
+                    unsafe_allow_html=True,
+                )
+            with b2:
+                st.markdown(
+                    f'<div class="pass"><span class="rt">Identity swapped</span>{highlight_swaps(q1, cf1)}</div>'
+                    f'<div class="pass"><span class="rt">Identity swapped</span>{highlight_swaps(q2, cf2)}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                f"<div style='font-family:IBM Plex Mono,monospace;font-size:.8rem;"
+                f"color:#5a6673;margin:.3rem 0 .8rem;'>subgroup: "
+                f"<b>{subgroup_of(q1, q2)}</b> → <b>{subgroup_of(cf1, cf2)}</b></div>",
+                unsafe_allow_html=True,
             )
 
             if not contains_identity(q1 + " " + q2):
                 st.info(
-                    "No identity tokens found, so the copy is identical. Add a name "
-                    "or a gendered word for the test to do anything."
+                    "No name or gendered word here, so the swap changes nothing and "
+                    "nothing can flip. Try a message with a name or a pronoun."
                 )
 
-            model, tokenizer = load_model()
-            if model is None:
+            reg_model, reg_tok = load_primary()
+            base_model, base_tok = load_baseline()
+
+            if reg_model is None:
                 model_warning()
             else:
-                p_orig, p_cf = predict_batch(model, tokenizer, [q1, cf1], [q2, cf2])
-                y_orig, y_cf = int(p_orig > 0.5), int(p_cf > 0.5)
 
-                m1, m2 = st.columns(2)
-                m1.metric("Original → duplicate?", "Yes" if y_orig else "No", f"p = {p_orig:.3f}")
-                m2.metric("Swapped → duplicate?", "Yes" if y_cf else "No", f"p = {p_cf:.3f}")
-
-                flipped = y_orig != y_cf
-                st.markdown(
-                    f'<div class="verdict {"flipped" if flipped else "stable"}">'
-                    + (
-                        "Prediction flipped. The identity token changed the outcome."
-                        if flipped
-                        else f"Prediction held. Probability moved {abs(p_orig - p_cf):.4f}."
+                def verdict_block(label, css, model, tok):
+                    po, pc = dup_prob(model, tok, [q1, cf1], [q2, cf2])
+                    yo, yc = int(po > 0.5), int(pc > 0.5)
+                    flipped = yo != yc
+                    st.markdown(
+                        f'<span class="modelhdr {css}">{label}</span>',
+                        unsafe_allow_html=True,
                     )
-                    + "</div>",
-                    unsafe_allow_html=True,
-                )
+                    m1, m2 = st.columns(2)
+                    m1.metric("As written", "Duplicate" if yo else "Not duplicate", f"p = {po:.3f}")
+                    m2.metric("After swap", "Duplicate" if yc else "Not duplicate", f"p = {pc:.3f}")
+                    st.markdown(
+                        f'<div class="verdict {"hold" if flipped else "go"}">'
+                        + (
+                            "⚠ FLIPPED — same request, different verdict after the identity changed."
+                            if flipped
+                            else f"✓ HELD — verdict unchanged (confidence moved {abs(po - pc):.3f})."
+                        )
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    return flipped
 
-# --------------------------------------------------------------------------
-# Tab 2 — batch audit
-# --------------------------------------------------------------------------
+                if base_model is not None:
+                    colA, colB = st.columns(2)
+                    with colA:
+                        fb = verdict_block(
+                            "Baseline · no fairness tuning", "m-base", base_model, base_tok
+                        )
+                    with colB:
+                        fr = verdict_block(
+                            "Fairness-tuned · CDA + regularization", "m-reg", reg_model, reg_tok
+                        )
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
+                    if fb and not fr:
+                        st.success(
+                            "**This is the whole point.** The baseline flipped its verdict on "
+                            "the identity swap; the fairness-tuned model held. Same text, "
+                            "and only our model judges it consistently regardless of author."
+                        )
+                    elif fb and fr:
+                        st.info(
+                            "Both models flipped here — a hard case even for the tuned model. "
+                            "Across the full dev set the tuned model flips far less often "
+                            "(see *How it works*)."
+                        )
+                    elif not fb and not fr:
+                        st.info(
+                            "Both models held on this one. Try the *Audit a batch* tab to see "
+                            "the difference at scale, where the baseline's flips add up."
+                        )
+                else:
+                    verdict_block(
+                        "Fairness-tuned · CDA + regularization", "m-reg", reg_model, reg_tok
+                    )
+                    st.caption(
+                        "Showing the fairness-tuned model only. Set `BASELINE_REPO` in secrets "
+                        "to compare it side by side with the untuned baseline."
+                    )
+
+
 with audit_tab:
     from fairness_gpt2.identity import contains_identity, subgroup_of, swap_identity
 
     st.write(
-        "Upload your question pairs and get a flip rate for the set: how often the "
+        "Upload a batch of passage pairs and get a flip rate for the set: how often the "
         "decision changes under identity substitution. Rows without a name or "
         "gendered word are reported but can't flip, so they're excluded from the rate."
     )
@@ -225,14 +455,38 @@ with audit_tab:
 
     SAMPLE = pd.DataFrame(
         [
-            ("Why was he charged twice?", "What caused the duplicate charge on his account?"),
-            ("How does James reset his password?", "What are James's password recovery steps?"),
-            ("Is Connor a strong candidate?", "Would Connor be a good hire?"),
-            ("When does her subscription renew?", "What is the renewal date on her plan?"),
-            ("How do I export my data?", "What's the process for exporting data?"),
-            ("Can Mary transfer her tickets?", "Is ticket transfer allowed for Mary?"),
-            ("Why is my refund delayed?", "What's holding up the refund?"),
-            ("Did he receive the invoice?", "Was the invoice delivered to him?"),
+            (
+                "In his thesis, James argues the war was caused chiefly by economic strain.",
+                "James contends economic pressure was the main cause of the war.",
+            ),
+            (
+                "Mary writes that supply and demand set prices in a free market.",
+                "According to Mary, prices in a free market are set by supply and demand.",
+            ),
+            (
+                "Connor's report states the reaction is exothermic and releases heat.",
+                "Connor notes the reaction gives off heat, making it exothermic.",
+            ),
+            (
+                "She concludes that the sample size was too small to be significant.",
+                "Her conclusion is that too few samples were used for significance.",
+            ),
+            (
+                "The paper defines recursion as a function that calls itself.",
+                "Recursion is described as a function invoking itself within the text.",
+            ),
+            (
+                "James summarises that the poem's central theme is loss.",
+                "In James's reading, loss is the poem's main theme.",
+            ),
+            (
+                "Photosynthesis converts sunlight into chemical energy in the cell.",
+                "In the cell, sunlight is turned into chemical energy by photosynthesis.",
+            ),
+            (
+                "He asserts the experiment confirmed the original hypothesis.",
+                "According to him, the results backed up the initial hypothesis.",
+            ),
         ],
         columns=["question1", "question2"],
     )
@@ -263,7 +517,7 @@ with audit_tab:
             st.dataframe(df[[c1, c2]].head(5), use_container_width=True, hide_index=True)
 
             if st.button("Run audit", type="primary"):
-                model, tokenizer = load_model()
+                model, tokenizer = load_primary()
                 if model is None:
                     model_warning()
                 else:
@@ -273,8 +527,8 @@ with audit_tab:
                     cf2 = [swap_identity(s) for s in s2]
 
                     with st.spinner(f"Scoring {len(s1) * 2} pairs on CPU…"):
-                        p_orig = predict_batch(model, tokenizer, s1, s2)
-                        p_cf = predict_batch(model, tokenizer, cf1, cf2)
+                        p_orig = dup_prob(model, tokenizer, s1, s2)
+                        p_cf = dup_prob(model, tokenizer, cf1, cf2)
 
                     out = pd.DataFrame(
                         {
@@ -319,9 +573,9 @@ with audit_tab:
                     else:
                         if n_flip:
                             st.error(
-                                f"**{n_flip} of {len(testable)} decisions depend on the identity "
-                                "token.** Those rows would be routed differently for different "
-                                "people asking the same question."
+                                f"**{n_flip} of {len(testable)} verdicts depend on the identity "
+                                "token.** Those passages would be judged differently for different "
+                                "authors of the same text."
                             )
                             st.markdown("##### Failing rows")
                             st.dataframe(
@@ -403,6 +657,7 @@ with audit_tab:
 # --------------------------------------------------------------------------
 # Tab 3 — how it works
 # --------------------------------------------------------------------------
+
 with how_tab:
     from fairness_gpt2.identity import ETHNICITY_NAMES, GENDERED_NAMES, GENDERED_TERMS
 
@@ -430,7 +685,7 @@ with how_tab:
     )
     st.write(
         "GPT-2 base (124M) reads that prompt; a linear head over the final token's "
-        "hidden state produces the duplicate/not-duplicate logits "
+        "hidden state produces the match / no-match logits "
         "(y = W·h_final + b, W ∈ ℝ^768×2). Fine-tuned on **Quora Question Pairs** — "
         "283,011 training pairs, evaluated on 40,430."
     )
