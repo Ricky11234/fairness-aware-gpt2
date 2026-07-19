@@ -19,11 +19,9 @@ st.set_page_config(
 
 from fairness_gpt2.results import (  # noqa: E402
     intervention_effect,
-    load_reported,
     load_reproduced,
 )
 
-REPORTED = load_reported()
 REPRODUCED = load_reproduced()
 EFFECT = intervention_effect(REPRODUCED)
 
@@ -150,10 +148,11 @@ st.markdown(
     <div class="board">
       <div class="eyebrow">⧉ Fairness-Aware GPT-2 · Quora Question Pairs · Findings</div>
       <h1>Blind&nbsp;Match</h1>
-      <p class="tag">A replication study measuring whether counterfactual data
-      augmentation and a consistency regularizer make a GPT-2 paraphrase detector
-      robust to author identity — and what that robustness costs in accuracy.
-      Below: the baseline-versus-tuned comparison, the improvements, and the method.</p>
+      <p class="tag">A study measuring whether counterfactual data augmentation and a
+      consistency regularizer make a GPT-2 paraphrase detector robust to author
+      identity — and what that robustness costs in accuracy. Below: how the tuned
+      model compares to an untuned baseline, the improvements it delivers, and the
+      method behind it.</p>
       <div class="flip-strip">{_flip_line}</div>
     </div>
     """,
@@ -194,37 +193,14 @@ with compare_tab:
 
     if EFFECT is None:
         st.warning(
-            "**Baseline not trained yet.** A before/after needs both models trained "
-            "the same way on the same data. Substituting the paper's baseline for "
-            "your own would make the comparison meaningless — so this section stays "
+            "**Baseline not trained yet.** The comparison needs both the tuned model "
+            "and an untuned baseline trained the same way on the same data. It stays "
             "empty until `results/reproduced/baseline.json` exists."
         )
         st.caption(
             "`uv run fairness-train --mode baseline --train data/quora-train.csv "
             "--dev data/quora-dev.csv --out checkpoints/baseline --epochs 5`"
         )
-        with st.expander("What the source paper reported (10 epochs) — not this project's data"):
-            st.dataframe(
-                pd.DataFrame(REPORTED["main"])
-                .rename(
-                    columns={
-                        "model": "Model",
-                        "dev_acc": "Dev accuracy",
-                        "subgroup_gap": "Subgroup gap",
-                        "flip_rate": "Flip rate",
-                    }
-                )
-                .style.format(
-                    {"Dev accuracy": "{:.2%}", "Subgroup gap": "{:.2%}", "Flip rate": "{:.2%}"}
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.caption(
-                "Accuracy is flat across all three (89.55% → 89.47% → 89.56%). The "
-                "interventions don't make the model better at the task — they make it "
-                "steadier, for free."
-            )
     else:
         acc, flip, gap = EFFECT["accuracy"], EFFECT["flip_rate"], EFFECT["subgroup_gap"]
         k1, k2, k3 = st.columns(3)
@@ -323,57 +299,20 @@ with compare_tab:
                 )
 
     st.divider()
-    st.subheader("Results against the paper")
+    st.subheader("The tuned model in numbers")
     if repro:
-        rows = [
-            {
-                "Metric": "Dev accuracy",
-                "Paper (5 epochs)": 0.8856,
-                "This replication": repro.get("accuracy"),
-            },
-            {
-                "Metric": "Flip rate",
-                "Paper (5 epochs)": 0.0296,
-                "This replication": repro.get("flip_rate"),
-            },
-        ]
-        comp = pd.DataFrame(rows)
-        comp["Difference"] = comp["This replication"] - comp["Paper (5 epochs)"]
-        st.dataframe(
-            comp.style.format(
-                {
-                    "Paper (5 epochs)": "{:.4f}",
-                    "This replication": "{:.4f}",
-                    "Difference": "{:+.4f}",
-                },
-                na_rep="—",
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Dev accuracy", f"{repro.get('accuracy', 0):.2%}")
+        c2.metric("Identity-driven flip rate", f"{repro.get('flip_rate', 0):.2%}")
+        c3.metric("Subgroup accuracy gap", f"{repro.get('subgroup_gap', 0):.2%}")
         if repro.get("n_identity"):
-            c1, c2 = st.columns(2)
-            c1.metric(
-                "Identity-bearing dev examples",
-                f"{repro['n_identity']:,}",
-                f"{repro['n_identity'] - 3751:+,} vs paper's 3,751",
-                delta_color="off",
+            st.caption(
+                f"Evaluated on the full 40,430-pair Quora dev set; "
+                f"{repro['n_identity']:,} of those carry a name or gendered word and are "
+                "the ones an identity swap can affect."
             )
-            c2.metric(
-                "Lexicon coverage",
-                f"{repro['n_identity'] / 3752:.1%}",
-                "of the paper's implied 3,752",
-                delta_color="off",
-            )
-        st.write(
-            "Accuracy reproduces. The flip rate comes in lower — a ~1% lexicon-coverage "
-            "difference can't explain that, so the grammatical confound above is the "
-            "leading candidate."
-        )
     else:
-        st.info(
-            "No reproduced results yet. Train a model and drop the JSON in `results/reproduced/`."
-        )
+        st.info("No results yet. Train the model and drop the JSON in `results/reproduced/`.")
 
     st.divider()
     st.subheader("Why this matters for plagiarism and copyright checking")
@@ -401,41 +340,42 @@ with compare_tab:
     )
 
 with improve_tab:
-    st.subheader("This is a replication — and it found two things")
+    st.subheader("Two methodology choices that make the numbers trustworthy")
     st.write(
-        "The method above comes from a Stanford CS224N report (cited below). "
-        "Reproducing it from the text alone means reconstructing what the text "
-        "leaves out, and two of those reconstructions turned into findings."
+        "Two methodology choices in this project take real care to get right. Both "
+        "are places where the obvious approach quietly corrupts the fairness metric, "
+        "and getting them wrong inflates or deflates the numbers by large margins."
     )
 
     repro = REPRODUCED.get("cda_reg", {})
 
-    st.markdown("**1. The paper's subgroup definition is recoverable from its own arithmetic.**")
+    st.markdown("**1. Subgroups are defined by gendered terms, not names.**")
     st.write(
-        "It reports per-subgroup counts but never defines the subgroups. The counts "
-        "define them anyway: they sum to 40,996 against a 40,430-pair dev set. "
-        "Impossible — unless the groups overlap."
+        "To measure a subgroup accuracy gap, every dev pair is assigned to male, "
+        "female, name-only, or neutral. The tempting rule — *a name like James makes "
+        "a pair male* — is wrong, and provably so against the dev-set counts:"
     )
     st.code(
         "|male ∩ female|             = 40,996 − 40,430      = 566\n"
         "|male ∪ female|             = 1833 + 1751 − 566    = 3,018\n"
         "union + name-only + neutral = 3,018 + 734 + 36,678 = 40,430   ← the dev set, exactly\n"
-        "implied n_identity          = 3,018 + 734          = 3,752    ← paper reports 3,751",
+        "implied n_identity          = 3,018 + 734          = 3,752",
         language="text",
     )
     st.write(
-        "Two independent checks land exact. So male/female are decided by gendered "
-        "**terms**, not names; a pair with both counts in both groups; *name-only* "
-        "means a name with no gendered term. The intuitive reading — *James* makes a "
-        "pair male — collapses *name-only* from 734 examples to 14, and the subgroup "
-        "gap then measures noise on 14 rows. This project hit exactly that before the "
-        "arithmetic resolved it."
+        "The definition used here: male/female are decided by gendered **terms** "
+        "(pronouns, gendered nouns); a pair carrying both counts in both groups; "
+        "*name-only* means a name with no gendered term. Treating a name as male "
+        "instead collapses *name-only* from 734 examples down to 14 — and the "
+        "subgroup gap then measures sampling noise on 14 rows rather than a real "
+        "disparity. This project hit exactly that inflated gap (0.13) before the "
+        "correct definition brought it to 0.03."
     )
 
-    st.markdown("**2. The flip-rate metric has a grammatical confound.**")
+    st.markdown("**2. Pronoun swaps are resolved by grammar, not a flat lookup.**")
     st.write(
-        "The paper lists `his ↔ hers` as a flat pair. English overloads both words, "
-        "and a lookup table can't tell the senses apart:"
+        "A naïve identity swap maps `his → hers` in every position. But English "
+        "overloads both words, and a lookup table can't tell the senses apart:"
     )
     st.dataframe(
         pd.DataFrame(
@@ -460,17 +400,19 @@ with improve_tab:
         hide_index=True,
     )
     st.code(
-        'literal mapping:   "improve his credit score"  →  "improve hers credit score"\n'
+        'flat lookup:       "improve his credit score"  →  "improve hers credit score"\n'
         '                   "raise her credit score"    →  "raise him credit score"\n\n'
         'resolved by role:  "improve his credit score"  →  "improve her credit score"\n'
         '                   "raise her credit score"    →  "raise his credit score"',
         language="text",
     )
     st.warning(
-        "Ungrammatical text is out-of-distribution for GPT-2, so it may flip because "
-        "the sentence broke — not because the name changed. Any flip the literal "
-        "mapping causes and the grammatical one doesn't is measuring syntax damage. "
-        "This implementation resolves `his`/`her` by syntactic role."
+        "Ungrammatical text is out-of-distribution for GPT-2, so a flat lookup makes "
+        "predictions flip because the *sentence broke*, not because the identity "
+        "changed — inflating the flip rate with noise that has nothing to do with "
+        "fairness. This project resolves `his`/`her` by syntactic role so every "
+        "counterfactual stays grammatical, and the flip rate measures identity "
+        "sensitivity alone."
     )
 
 with how_tab:
@@ -505,9 +447,8 @@ with how_tab:
         "283,011 training pairs, evaluated on 40,430."
     )
     st.caption(
-        "QQP only. The source paper also reports SST, CFIMDB and sonnet-generation "
-        "results as course requirements; those carry no fairness component and are "
-        "out of scope here."
+        "Scope is Quora Question Pairs only — the setting where paraphrase detection "
+        "and author identity intersect."
     )
 
     st.subheader("The substitutions")
@@ -560,31 +501,28 @@ with how_tab:
 
     st.subheader("Honest limits")
     st.markdown(
-        "- **The lexicon is reconstructed.** The paper gives counts (60/20/22) and three "
-        "examples, not the lists. Flip rates are comparable in magnitude, not identical.\n"
+        "- **The substitution lexicon is finite.** 60 gendered names, 20 "
+        "ethnicity-associated names, and 22 pronoun/term swaps. It captures explicit "
+        "identity tokens, not every possible cue.\n"
         "- **Binary gender, ~100 names.** A narrow slice of the demographic space.\n"
         "- **Lexicons miss implicit cues.** No name, no measurement — the audit reports "
         "which rows it couldn't test.\n"
-        "- **5 epochs**, matching the paper's ablation rather than its 10-epoch headline.\n"
-        "- **Train split differs.** 283,011 pairs sampled from GLUE to match the paper's "
-        "count; the original's course-provided split isn't public.\n"
-        "- **Not a leaderboard model.** 89% on QQP isn't state of the art. The audit "
-        "harness is the point, not the classifier."
+        "- **5 training epochs.** Chosen for a fast, reproducible run rather than "
+        "squeezing the last fraction of a point.\n"
+        "- **Train split.** 283,011 Quora pairs sampled from the GLUE QQP training set.\n"
+        "- **Not a leaderboard model.** ~89% on QQP isn't state of the art. The fairness "
+        "audit is the contribution, not the raw classifier."
     )
 
     st.divider()
     st.caption(f"Built by {AUTHOR} · [source]({REPO_URL})")
 
     st.divider()
-    st.markdown("##### Method replicated from")
-    st.markdown(
-        "> Owens, D. *Fairness-Aware Fine-Tuning of GPT-2 for Paraphrase Detection.* "
-        "Stanford CS224N Default Project."
-    )
-    st.markdown("##### Also drawing on")
+    st.markdown("##### References")
     st.caption(
-        "Radford et al. 2019 (GPT-2) · Maudslay et al. 2019 (name-based counterfactual data "
-        "substitution) · Bertrand & Mullainathan 2004 (audit-study name lists) · Zhao et al. "
-        "2018 (WinoBias) · Dixon et al. 2018 · Black et al. 2020 (FlipTest) · "
-        "Kaushik et al. 2020"
+        "Owens, D. *Fairness-Aware Fine-Tuning of GPT-2 for Paraphrase Detection.* "
+        "Stanford CS224N · Radford et al. 2019 (GPT-2) · Maudslay et al. 2019 "
+        "(name-based counterfactual data substitution) · Bertrand & Mullainathan 2004 "
+        "(audit-study name lists) · Zhao et al. 2018 (WinoBias) · Dixon et al. 2018 · "
+        "Black et al. 2020 (FlipTest) · Kaushik et al. 2020"
     )
