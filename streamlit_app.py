@@ -258,30 +258,42 @@ with compare_tab:
             var_name="Model",
             value_name="Value",
         )
+        # Short axis labels ("Base"/"Tuned") so the two bars per panel don't
+        # overlap; full names live in the legend and tooltip.
+        long["Model"] = long["Model"].map({"Baseline": "Base", "CDA + Reg.": "Tuned"})
         st.altair_chart(
             alt.Chart(long)
-            .mark_bar()
+            .mark_bar(size=34)
             .encode(
-                x=alt.X("Model:N", title=None, axis=alt.Axis(labelAngle=0)),
+                x=alt.X(
+                    "Model:N",
+                    title=None,
+                    sort=["Base", "Tuned"],
+                    axis=alt.Axis(labelAngle=0, labelFontSize=12),
+                ),
                 y=alt.Y("Value:Q", title=None, axis=alt.Axis(format="%")),
                 color=alt.Color(
                     "Model:N",
-                    legend=None,
-                    scale=alt.Scale(
-                        domain=["Baseline", "CDA + Reg."], range=["#9aa7b4", "#3b6ea5"]
-                    ),
+                    title=None,
+                    sort=["Base", "Tuned"],
+                    scale=alt.Scale(domain=["Base", "Tuned"], range=["#b9c2ae", "#1f4d3a"]),
+                    legend=alt.Legend(orient="top", direction="horizontal"),
                 ),
                 tooltip=["Model", "Metric", alt.Tooltip("Value:Q", format=".2%")],
             )
-            .properties(height=190)
+            .properties(width=150, height=200)
             .facet(
                 column=alt.Column(
-                    "Metric:N", title=None, sort=["Dev accuracy ↑", "Flip rate ↓", "Subgroup gap ↓"]
+                    "Metric:N",
+                    title=None,
+                    sort=["Dev accuracy ↑", "Flip rate ↓", "Subgroup gap ↓"],
+                    header=alt.Header(labelFontSize=13, labelFontWeight="bold"),
                 )
             )
             .resolve_scale(y="independent"),
             use_container_width=True,
         )
+        st.caption("Base = untuned baseline · Tuned = CDA + consistency regularizer.")
 
         if gap["delta"] > 0:
             st.warning(
