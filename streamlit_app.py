@@ -337,14 +337,17 @@ with compare_tab:
         "consequences — an academic-integrity referral, a failing grade, a copyright strike — "
         "assigned partly on identity rather than text."
     )
-    st.write(
-        "The improvement measured above is exactly the property such a system needs. A "
-        f"**{abs(EFFECT['flip_rate']['pct']):.0%} reduction in identity-driven flips** means the "
-        "similarity verdict is far more likely to depend on the words on the page and far less "
-        "on whose name is attached to them — at no cost to how well the model tells matches from "
-        "non-matches. Put plainly: the same passage draws the same flag whether it is signed "
-        "*James* or *Mary*."
-    ) if EFFECT else st.info("Train the baseline to populate this comparison.")
+    if EFFECT:
+        st.write(
+            "The improvement measured above is exactly the property such a system needs. A "
+            f"**{abs(EFFECT['flip_rate']['pct']):.0%} reduction in identity-driven flips** means "
+            "the similarity verdict is far more likely to depend on the words on the page and far "
+            "less on whose name is attached to them — at no cost to how well the model tells "
+            "matches from non-matches. Put plainly: the same passage draws the same flag whether "
+            "it is signed *James* or *Mary*."
+        )
+    else:
+        st.info("Train the baseline to populate this comparison.")
     st.caption(
         "Scope note: this project audits the pairwise similarity operation those tools rely on. "
         "It is not a drop-in replacement for a full plagiarism service, which also matches against "
